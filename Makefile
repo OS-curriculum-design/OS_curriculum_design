@@ -10,7 +10,8 @@ C_SOURCES = \
 	drivers/keyboard.c \
 	drivers/mouse.c \
 	include/string.c \
-	shell/shell.c
+	shell/shell.c \
+	process/process.c
 
 C_OBJECTS = $(C_SOURCES:.c=.o)
 
@@ -34,6 +35,9 @@ include/%.o: include/%.c
 shell/%.o: shell/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+process/%.o: process/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 myos.bin: boot/boot.o $(C_OBJECTS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ boot/boot.o $(C_OBJECTS)
 
@@ -50,7 +54,7 @@ run: all
 	qemu-system-i386 -cdrom myos.iso
 
 clean:
-	rm -f boot/*.o kernel/*.o console/*.o drivers/*.o include/*.o shell/*.o
+	rm -f boot/*.o kernel/*.o console/*.o drivers/*.o include/*.o shell/*.o process/*.o
 	rm -f myos.bin myos.iso iso/boot/myos.bin
 
 .PHONY: all check run clean

@@ -2,7 +2,7 @@
 
 #define VGA_MEMORY ((uint16_t*)0xB8000)
 
-static size_t cursor_row = 1;
+static size_t cursor_row = 0;
 static size_t cursor_col = 0;
 static uint8_t current_color = 0x07;
 
@@ -17,7 +17,7 @@ void console_set_color(uint8_t fg, uint8_t bg) {
 static void scroll_if_needed(void) {
     if (cursor_row < VGA_HEIGHT) return;
 
-    for (size_t row = 2; row < VGA_HEIGHT; row++) {
+    for (size_t row = 1; row < VGA_HEIGHT; row++) {
         for (size_t col = 0; col < VGA_WIDTH; col++) {
             VGA_MEMORY[(row - 1) * VGA_WIDTH + col] =
                 VGA_MEMORY[row * VGA_WIDTH + col];
@@ -43,7 +43,7 @@ void console_clear(void) {
             VGA_MEMORY[row * VGA_WIDTH + col] = vga_entry(' ', current_color);
         }
     }
-    cursor_row = 1;
+    cursor_row = 0;
     cursor_col = 0;
 }
 

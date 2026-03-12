@@ -2,6 +2,7 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/mouse.h"
 #include "../shell/shell.h"
+#include "../process/process.h"
 
 static void draw_status_bar(void) {
     MouseState ms = mouse_get_state();
@@ -39,9 +40,10 @@ void kernel_main(void) {
 
     keyboard_init();
     mouse_init();
+    process_init();
     shell_init();
 
-    draw_status_bar();
+    //draw_status_bar();
 
     console_write_line("========================================");
     console_write_line("        Welcome to MyOS Kernel");
@@ -50,6 +52,7 @@ void kernel_main(void) {
     console_write_line("[OK] Entered 32-bit kernel_main()");
     console_write_line("[OK] Keyboard initialized");
     console_write_line("[OK] Mouse initialized");
+    console_write_line("[OK] Process manager initialized");
     console_write_line("[OK] Command line ready");
     console_write_line("");
     console_write_line("Type 'help' to see commands.");
@@ -57,8 +60,9 @@ void kernel_main(void) {
 
     while (1) {
         char c;
+
         mouse_poll();
-        draw_status_bar();
+        //draw_status_bar();
 
         if (keyboard_read_char(&c)) {
             shell_handle_char(c);

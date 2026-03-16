@@ -63,7 +63,7 @@ typedef struct {
     uint8_t zero;
     uint8_t type_attr;
     uint16_t offset_high;
-} __attribute__((packed)) IdtEntry;
+} __attribute__((packed)) IdtEntry;//禁止编译器对齐结构体
 
 typedef struct {
     /*
@@ -107,7 +107,7 @@ extern void isr28(void);
 extern void isr29(void);
 extern void isr30(void);
 extern void isr31(void);
-
+//对应CPU异常或特权异常（如除0/越界），一般汇编编写
 extern void irq0(void);
 extern void irq1(void);
 extern void irq2(void);
@@ -124,7 +124,7 @@ extern void irq12(void);
 extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
-
+//硬件中断请求（如键盘输入）
 static IdtEntry idt[IDT_ENTRIES];
 static IdtPointer idt_ptr;
 /* IRQ0~IRQ15 各自对应一条 C 处理函数。 */

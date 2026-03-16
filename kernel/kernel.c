@@ -2,6 +2,7 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/mouse.h"
 #include "../interrupt/interrupts.h"
+#include "../memory/memory.h"
 #include "../shell/shell.h"
 #include "../timer/timer.h"
 
@@ -75,6 +76,7 @@ void kernel_main(void) {
     keyboard_init();
     mouse_init();
     timer_init(100);
+    memory_manager_init();
     shell_init();
     interrupts_enable();
 
@@ -88,6 +90,7 @@ void kernel_main(void) {
     console_write_line("[OK] Keyboard initialized");
     console_write_line("[OK] Mouse initialized");
     console_write_line("[OK] PIT timer initialized at 100 Hz");
+    console_write_line("[OK] Memory manager initialized");
     console_write_line("[OK] Interrupts enabled");
     console_write_line("[OK] Command line ready");
     console_write_line("");
@@ -108,7 +111,7 @@ void kernel_main(void) {
         }
 
         if (timer_take_schedule_event()) {
-            /* Scheduler hook for future RR task switching. */
+            memory_manager_tick();
         }
 
         __asm__ __volatile__("hlt");

@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../drivers/mouse.h"
 #include "../include/string.h"
+#include "../memory/memory.h"
 #include "../timer/timer.h"
 
 #define INPUT_MAX 128
@@ -39,6 +40,8 @@ static void run_command(const char* cmd) {
         console_write_line("  ticks");
         console_write_line("  slice");
         console_write_line("  slice <ticks>");
+        console_write_line("  mem");
+        console_write_line("  mem help");
         return;
     }
 
@@ -48,13 +51,13 @@ static void run_command(const char* cmd) {
     }
 
     if (strcmp(cmd, "version") == 0) {
-        console_write_line("MyOS version 0.2");
+        console_write_line("MyOS version 0.3");
         return;
     }
 
     if (strcmp(cmd, "about") == 0) {
         console_write_line("MyOS: simple educational operating system.");
-        console_write_line("Stage 2: CLI + keyboard + mouse interaction.");
+        console_write_line("Stage 3: memory management simulator.");
         return;
     }
 
@@ -116,6 +119,95 @@ static void run_command(const char* cmd) {
         console_write("Time slice updated to ");
         console_write_dec((int)timer_get_timeslice());
         console_write_line(" ticks");
+        return;
+    }
+
+    if (strcmp(cmd, "mem") == 0) {
+        memory_manager_print_status();
+        return;
+    }
+
+    if (strcmp(cmd, "mem help") == 0) {
+        memory_manager_print_help();
+        return;
+    }
+
+    if (strcmp(cmd, "mem start") == 0) {
+        memory_manager_start();
+        console_write_line("Memory simulation started.");
+        return;
+    }
+
+    if (strcmp(cmd, "mem stop") == 0) {
+        memory_manager_stop();
+        console_write_line("Memory simulation stopped.");
+        return;
+    }
+
+    if (strcmp(cmd, "mem reset") == 0) {
+        memory_manager_reset();
+        console_write_line("Memory simulation reset.");
+        return;
+    }
+
+    if (strcmp(cmd, "mem log") == 0) {
+        memory_manager_print_log();
+        return;
+    }
+
+    if (strcmp(cmd, "mem compare") == 0) {
+        memory_manager_run_compare();
+        return;
+    }
+
+    if (strncmp(cmd, "mem mode ", 9) == 0) {
+        if (!memory_manager_set_mode(cmd + 9)) {
+            console_write_line("Usage: mem mode bestfit|segpage|vm");
+            return;
+        }
+
+        console_write("Memory mode set to ");
+        console_write_line(memory_manager_mode_name());
+        return;
+    }
+
+    if (strncmp(cmd, "mem step ", 9) == 0) {
+        uint32_t cycles = 0;
+        if (!parse_uint(cmd + 9, &cycles)) {
+            console_write_line("Usage: mem step <cycles>");
+            return;
+        }
+
+        memory_manager_step(cycles);
+        console_write("Memory simulation advanced by ");
+        console_write_dec((int)cycles);
+        console_write_line(" cycles");
+        return;
+    }
+
+    if (strncmp(cmd, "mem pages ", 10) == 0) {
+        uint32_t pages = 0;
+        if (!parse_uint(cmd + 10, &pages) || !memory_manager_set_user_pages(pages)) {
+            console_write_line("Usage: mem pages <4-32>");
+            return;
+        }
+
+        console_write("User page count set to ");
+        console_write_dec((int)pages);
+        console_put_char('\n');
+        return;
+    }
+
+    if (strncmp(cmd, "mem frames ", 11) == 0) {
+        uint32_t frames = 0;
+        if (!parse_uint(cmd + 11, &frames) || !memory_manager_set_physical_frames(frames)) {
+            console_write_line("Usage: mem frames <4-32>");
+            return;
+        }
+
+        console_write("Physical frame count set to ");
+        console_write_dec((int)frames);
+        console_put_char('\n');
         return;
     }
 

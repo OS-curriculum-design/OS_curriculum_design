@@ -11,6 +11,7 @@ C_SOURCES = \
 	drivers/keyboard.c \
 	drivers/mouse.c \
 	include/string.c \
+	memory/memory.c \
 	shell/shell.c \
 	timer/timer.c
 
@@ -34,6 +35,9 @@ drivers/%.o: drivers/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 include/%.o: include/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+memory/%.o: memory/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 shell/%.o: shell/%.c
@@ -61,7 +65,7 @@ run: all
 	qemu-system-i386 -cdrom myos.iso
 
 clean:
-	rm -f boot/*.o kernel/*.o console/*.o interrupt/*.o drivers/*.o include/*.o shell/*.o timer/*.o
+	rm -f boot/*.o kernel/*.o console/*.o interrupt/*.o drivers/*.o include/*.o memory/*.o shell/*.o timer/*.o
 	rm -f myos.bin myos.iso iso/boot/myos.bin
 
 .PHONY: all check run clean

@@ -23,43 +23,21 @@ static int parse_uint(const char* str, uint32_t* out) {
     return 1;
 }
 
+static uint32_t ticks_to_ms(uint32_t ticks) {
+    uint32_t frequency = timer_get_frequency();
+
+    if (frequency == 0) {
+        return 0;
+    }
+
+    return (ticks * 1000U) / frequency;
+}
+
 static void run_command(const char* cmd) {
     if (strcmp(cmd, "") == 0) return;
 
-    if (strcmp(cmd, "help") == 0) {
-        console_write_line("Commands:");
-        console_write_line("  help");
-        console_write_line("  clear");
-        console_write_line("  version");
-        console_write_line("  about");
-        console_write_line("  echo <text>");
-        console_write_line("  mouse");
-        console_write_line("  mouse on");
-        console_write_line("  mouse off");
-        console_write_line("  ticks");
-        console_write_line("  slice");
-        console_write_line("  slice <ticks>");
-        return;
-    }
-
     if (strcmp(cmd, "clear") == 0) {
         console_clear();
-        return;
-    }
-
-    if (strcmp(cmd, "version") == 0) {
-        console_write_line("MyOS version 0.2");
-        return;
-    }
-
-    if (strcmp(cmd, "about") == 0) {
-        console_write_line("MyOS: simple educational operating system.");
-        console_write_line("Stage 2: CLI + keyboard + mouse interaction.");
-        return;
-    }
-
-    if (strncmp(cmd, "echo ", 5) == 0) {
-        console_write_line(cmd + 5);
         return;
     }
 
@@ -99,9 +77,12 @@ static void run_command(const char* cmd) {
     }
 
     if (strcmp(cmd, "slice") == 0) {
+        uint32_t ticks = timer_get_timeslice();
         console_write("Round-robin time slice: ");
-        console_write_dec((int)timer_get_timeslice());
-        console_write_line(" ticks");
+        console_write_dec((int)ticks);
+        console_write(" ticks (");
+        console_write_dec((int)ticks_to_ms(ticks));
+        console_write_line(" ms)");
         return;
     }
 
@@ -115,7 +96,9 @@ static void run_command(const char* cmd) {
         timer_set_timeslice(ticks);
         console_write("Time slice updated to ");
         console_write_dec((int)timer_get_timeslice());
-        console_write_line(" ticks");
+        console_write(" ticks (");
+        console_write_dec((int)ticks_to_ms(timer_get_timeslice()));
+        console_write_line(" ms)");
         return;
     }
 

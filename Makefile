@@ -5,6 +5,7 @@ CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -nostdinc 
 LDFLAGS = -m elf_i386 -T linker.ld
 
 C_SOURCES = \
+	kernel/gdt.c \
 	kernel/kernel.c \
 	console/console.c \
 	interrupt/interrupts.c \
@@ -19,6 +20,9 @@ C_OBJECTS = $(C_SOURCES:.c=.o)
 all: check myos.iso
 
 boot/boot.o: boot/boot.s
+	$(CC) -m32 -c $< -o $@
+
+kernel/gdt_flush.o: kernel/gdt_flush.s
 	$(CC) -m32 -c $< -o $@
 
 interrupt/interrupt_stubs.o: interrupt/interrupt_stubs.s
@@ -45,8 +49,8 @@ interrupt/%.o: interrupt/%.c
 timer/%.o: timer/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-myos.bin: boot/boot.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot/boot.o interrupt/interrupt_stubs.o $(C_OBJECTS)
+myos.bin: boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS)
 
 check: myos.bin
 	grub-file --is-x86-multiboot myos.bin

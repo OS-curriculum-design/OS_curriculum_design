@@ -13,11 +13,11 @@
 #define IDT_ENTRIES 256
 
 /* 8259A PIC 的 I/O 端口。 */
-#define PIC1_COMMAND 0x20
-#define PIC1_DATA 0x21
-#define PIC2_COMMAND 0xA0
-#define PIC2_DATA 0xA1
-
+#define PIC1_COMMAND 0x20//主 PIC 命令寄存器
+#define PIC1_DATA 0x21//主 PIC 数据寄存器
+#define PIC2_COMMAND 0xA0//从 PIC 命令寄存器
+#define PIC2_DATA 0xA1//从 PIC 数据寄存器
+//PIC是中断控制器，主PIC负责0-7,从PIC负责8-15
 /*
  * 向 PIC 命令端口写 0x20 表示 EOI（End Of Interrupt）：
  * “这次中断处理完了，你可以继续发下一次了”。

@@ -5,6 +5,7 @@
 #include "../timer/timer.h"
 
 #define INPUT_MAX 128
+#define MAX_ARGS  8
 
 static char input_buffer[INPUT_MAX];
 static int input_len = 0;
@@ -41,31 +42,135 @@ static void run_command(const char* cmd) {
         return;
     }
 
-    if (strcmp(cmd, "mouse") == 0) {
-        MouseState ms = mouse_get_state();
-        console_write("Mouse: x=");
-        console_write_dec(ms.x);
-        console_write(" y=");
-        console_write_dec(ms.y);
-        console_write(" left=");
-        console_write_dec(ms.left);
-        console_write(" right=");
-        console_write_dec(ms.right);
-        console_write(" middle=");
-        console_write_dec(ms.middle);
+    if (strcmp(argv[0], "mouse") == 0) {
+        if (argc == 1) {
+            MouseState ms = mouse_get_state();
+            console_write("Mouse: x=");
+            console_write_dec(ms.x);
+            console_write(" y=");
+            console_write_dec(ms.y);
+            console_write(" left=");
+            console_write_dec(ms.left);
+            console_write(" right=");
+            console_write_dec(ms.right);
+            console_write(" middle=");
+            console_write_dec(ms.middle);
+            console_put_char('\n');
+            return;
+        }
+
+        if (argc == 2 && strcmp(argv[1], "on") == 0) {
+            mouse_set_enabled(1);
+            console_write_line("Mouse enabled.");
+            return;
+        }
+
+        if (argc == 2 && strcmp(argv[1], "off") == 0) {
+            mouse_set_enabled(0);
+            console_write_line("Mouse disabled.");
+            return;
+        }
+
+        console_write_line("Usage: mouse | mouse on | mouse off");
+        return;
+    }
+
+    if (strcmp(argv[0], "ps") == 0) {
+        process_list();
+        return;
+    }
+
+    if (strcmp(argv[0], "exec") == 0) {
+        if (argc != 4) {
+            console_write_line("Usage: exec <name> <burst> <priority>");
+            return;
+        }
+        process_create(argv[1], atoi(argv[2]), atoi(argv[3]));
+        return;
+    }
+
+    if (strcmp(argv[0], "kill") == 0) {
+        if (argc != 2) {
+            console_write_line("Usage: kill <pid>");
+            return;
+        }
+        process_kill(atoi(argv[1]));
+        return;
+    }
+
+    if (strcmp(argv[0], "block") == 0) {
+        if (argc != 2) {
+            console_write_line("Usage: block <pid>");
+            return;
+        }
+        process_block(atoi(argv[1]));
+        return;
+    }
+
+    if (strcmp(argv[0], "wakeup") == 0) {
+        if (argc != 2) {
+            console_write_line("Usage: wakeup <pid>");
+            return;
+        }
+        process_wakeup(atoi(argv[1]));
+        return;
+    }
+
+    if (strcmp(argv[0], "sched") == 0) {
+        if (argc != 2) {
+            console_write_line("Usage: sched fcfs|sjf|rr|prio");
+            return;
+        }
+
+        if (strcmp(argv[1], "fcfs") == 0) {
+            process_set_scheduler(SCHED_FCFS);
+            console_write_line("Scheduler set to FCFS.");
+            return;
+        }
+
+        if (strcmp(argv[1], "sjf") == 0) {
+            process_set_scheduler(SCHED_SJF);
+            console_write_line("Scheduler set to SJF.");
+            return;
+        }
+
+        if (strcmp(argv[1], "rr") == 0) {
+            process_set_scheduler(SCHED_RR);
+            console_write_line("Scheduler set to RR.");
+            return;
+        }
+
+        if (strcmp(argv[1], "prio") == 0 || strcmp(argv[1], "priority") == 0) {
+            process_set_scheduler(SCHED_PRIORITY);
+            console_write_line("Scheduler set to PRIORITY.");
+            return;
+        }
+
+        console_write_line("Unknown scheduler. Use fcfs|sjf|rr|prio.");
+        return;
+    }
+
+    if (strcmp(argv[0], "quantum") == 0) {
+        if (argc != 2) {
+            console_write_line("Usage: quantum <n>");
+            return;
+        }
+
+        int q = atoi(argv[1]);
+        if (q <= 0) {
+            console_write_line("Error: quantum must be > 0.");
+            return;
+        }
+
+        process_set_rr_quantum(q);
+        console_write("RR quantum set to ");
+        console_write_dec(process_get_rr_quantum());
         console_put_char('\n');
         return;
     }
 
-    if (strcmp(cmd, "mouse on") == 0) {
-        mouse_set_enabled(1);
-        console_write_line("Mouse enabled.");
-        return;
-    }
-
-    if (strcmp(cmd, "mouse off") == 0) {
-        mouse_set_enabled(0);
-        console_write_line("Mouse disabled.");
+    if (strcmp(argv[0], "run") == 0) {
+        process_run();
         return;
     }
 
@@ -103,7 +208,7 @@ static void run_command(const char* cmd) {
     }
 
     console_write("Unknown command: ");
-    console_write_line(cmd);
+    console_write_line(argv[0]);
 }
 
 void shell_init(void) {

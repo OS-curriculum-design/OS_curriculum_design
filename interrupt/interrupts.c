@@ -10,10 +10,10 @@
  * - 32~47: 我们通常放 PIC 重映射后的 16 条硬件 IRQ
  * - 其余: 可以留给系统调用、自定义软件中断等
  */
-#define IDT_ENTRIES 256
+#define IDT_ENTRIES 256 // interrupt descriptor table
 
 /* 8259A PIC 的 I/O 端口。 */
-#define PIC1_COMMAND 0x20//主 PIC 命令寄存器
+#define PIC1_COMMAND 0x20//主 PIC 命令寄存器  pic for programmable interrupt controller
 #define PIC1_DATA 0x21//主 PIC 数据寄存器
 #define PIC2_COMMAND 0xA0//从 PIC 命令寄存器
 #define PIC2_DATA 0xA1//从 PIC 数据寄存器
@@ -177,8 +177,18 @@ static void idt_set_gate(uint8_t vector, uint32_t handler, uint16_t selector, ui
 }
 
 static void idt_load(void) {
-    /* lidt 把 idt_ptr 指向的描述符装进 CPU 的 IDTR 寄存器。 */
-    __asm__ __volatile__("lidt %0" : : "m"(idt_ptr));
+    /* 
+    lidt 把 idt_ptr 指向的描述符装进 CPU 的 IDTR 寄存器。
+    后注：asm表示汇编内联，volatile表示不要优化，
+    括号内是一条汇编指令：
+    lidt表示load idt，把idt加载进内存中。
+    %0代表这里填入的是输入中的第一个操作数，也就是后面的"m"(idt_ptr)。
+    asm的格式应当是asm(模板 : 输出 : 输入 : clobber)，
+    clobber代表什么可能被修改，比如说__asm__("mov $1, %eax");
+    如果没有clobber，编译器就不知道eax被修改了，所以一定要写成__asm__("mov $1, %%eax" : : : "eax");
+    这里我们的输入是"m"(idt_ptr)，m是一个页数，代表后面的东西是一个变量，要从内存中去读取
+    */
+    __asm__ __volatile__("lidt %0" : : "m"(idt_ptr)); 
 }
 
 static uint16_t read_cs(void) {
@@ -187,6 +197,7 @@ static uint16_t read_cs(void) {
      * 读取当前代码段选择子。
      * 这里不能硬编码 0x08，因为当前引导环境（比如 GRUB 设置的 GDT）
      * 不一定使用那组段号。之前就是这里写死导致中断一开就 #GP。
+     * 后注：将cs寄存器中的值传入第零个操作数，即后面的cs变量，=代表是一个输出，r代表需要一个寄存器来接受输出
      */
     __asm__ __volatile__("mov %%cs, %0" : "=r"(cs));
     return cs;

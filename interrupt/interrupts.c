@@ -207,7 +207,7 @@ static void pic_remap(void) {
     /* 先保存原屏蔽位，避免重映射时把原本的使能状态弄丢。 */
     uint8_t mask1 = inb(PIC1_DATA);
     uint8_t mask2 = inb(PIC2_DATA);
-
+    //初始化的时候发四个ICW，第一个发到命令端口，后三个发到数据端口
     /*
      * 0x11 = ICW1:
      * - bit4=1: 表示开始初始化 PIC
@@ -395,7 +395,7 @@ void irq_register_handler(uint8_t irq, irq_handler_t handler) {
 void isr_dispatch(InterruptFrame* frame) {
     /* 小于 32 的向量号表示 CPU 异常。 */
     if (frame->int_no < IRQ_BASE) {
-        kernel_panic(frame);
+        kernel_panic(frame);//控制台报错，系统停止
         return;
     }
 

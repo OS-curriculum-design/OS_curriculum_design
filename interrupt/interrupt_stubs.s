@@ -3,22 +3,22 @@
 .section .text
 .code32
 
-.macro ISR_NOERR num
+.macro ISR_NOERR num//没有错误码的异常
 .global isr\num
 isr\num:
-    pushl $0
+    pushl $0//压入一个0,与CPU自动压入错误码的对齐布局
     pushl $\num
     jmp isr_common_stub
 .endm
 
-.macro ISR_ERR num
+.macro ISR_ERR num//CPU会自动压入错误码的异常
 .global isr\num
 isr\num:
     pushl $\num
     jmp isr_common_stub
 .endm
 
-.macro IRQ num vector
+.macro IRQ num vector//硬件中断
 .global irq\num
 irq\num:
     pushl $0
@@ -77,13 +77,13 @@ IRQ 14, 46
 IRQ 15, 47
 
 isr_common_stub:
-    pusha
+    pusha//保存通用寄存器
     pushl %ds
     pushl %es
     pushl %fs
     pushl %gs
 
-    pushl %esp
+    pushl %esp//InterruptFrame*
     call isr_dispatch
     addl $4, %esp
 
@@ -92,7 +92,7 @@ isr_common_stub:
     popl %es
     popl %ds
     popa
-    addl $8, %esp
+    addl $8, %esp//前面压入的错误码和num
     iret
 
 .section .note.GNU-stack,"",@progbits

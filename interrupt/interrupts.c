@@ -270,6 +270,38 @@ static void pic_send_eoi(uint8_t irq) {
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
+static uint32_t read_cr2(void) {
+    uint32_t cr2;
+    __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+    return cr2;
+}
+
+static void print_page_fault_error(uint32_t err_code) {
+    console_write("PF reason:");
+    if (!(err_code & 0x01)) {
+        console_write(" not-present");
+    } else {
+        console_write(" protection");
+    }
+    if (err_code & 0x02) {
+        console_write(" write");
+    } else {
+        console_write(" read");
+    }
+    if (err_code & 0x04) {
+        console_write(" user");
+    } else {
+        console_write(" kernel");
+    }
+    if (err_code & 0x08) {
+        console_write(" reserved-bit");
+    }
+    if (err_code & 0x10) {
+        console_write(" instruction-fetch");
+    }
+    console_put_char('\n');
+}
+
 static void kernel_panic(InterruptFrame* frame) { // 发生无法处理的内核错误，打印错误信息并停机
     console_set_color(0x0F, 0x04);
     console_write_line("");
@@ -280,11 +312,24 @@ static void kernel_panic(InterruptFrame* frame) { // 发生无法处理的内核
     console_write_dec((int)frame->int_no);
     console_put_char('\n');
     console_write("Error code: ");
-    console_write_dec((int)frame->err_code);
+    console_write_hex(frame->err_code);
     console_put_char('\n');
     console_write("EIP: ");
-    console_write_dec((int)frame->eip);
+    console_write_hex(frame->eip);
     console_put_char('\n');
+    console_write("CS: ");
+    console_write_hex(frame->cs);
+    console_put_char('\n');
+    console_write("EFLAGS: ");
+    console_write_hex(frame->eflags);
+    console_put_char('\n');
+
+    if (frame->int_no == 14) {
+        console_write("CR2: ");
+        console_write_hex(read_cr2());
+        console_put_char('\n');
+        print_page_fault_error(frame->err_code);
+    }
 
     interrupts_disable();
     while (1) {

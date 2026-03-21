@@ -27,10 +27,15 @@ void kernel_main(void) {
             shell_handle_char(c);
         }
 
-        if (timer_take_schedule_event()) {
+        while (timer_take_schedule_event()) {
             /* Scheduler hook for future RR task switching. */
         }
 
-        __asm__ __volatile__("hlt");
+        interrupts_disable();
+        if (!keyboard_has_char() && !timer_has_schedule_event()) {
+            __asm__ __volatile__("sti\n\thlt" : : : "memory");
+        } else {
+            interrupts_enable();
+        }
     }
 }

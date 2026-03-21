@@ -153,3 +153,14 @@ void console_write_dec(int value) // 写数字
         console_put_char(buf[i]);
     }
 }
+
+void console_write_hex(uint32_t value)
+{
+    static const char hex_digits[] = "0123456789ABCDEF";
+
+    console_write("0x");
+    for (int shift = 28; shift >= 0; shift -= 4)
+    {
+        console_put_char(hex_digits[(value >> shift) & 0x0F]);
+    }
+}

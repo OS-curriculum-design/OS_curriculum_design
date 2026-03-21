@@ -104,9 +104,13 @@ void timer_set_timeslice(uint32_t ticks) {
         ticks = 1;
     }
 
+    uint32_t flags = interrupt_save_and_disable();
+
     timeslice_ticks = ticks;
     slice_remaining = ticks;
     schedule_event_pending = 0;
+
+    interrupt_restore(flags);
 }
 
 uint32_t timer_get_timeslice(void) {
@@ -128,4 +132,8 @@ int timer_take_schedule_event(void) {
     schedule_event_pending--;
     interrupt_restore(flags);
     return 1;
+}
+
+int timer_has_schedule_event(void) {
+    return schedule_event_pending != 0;
 }

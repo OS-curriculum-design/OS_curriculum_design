@@ -12,6 +12,7 @@ void console_put_char(char c);
 void console_write(const char* str);
 void console_write_line(const char* str);
 void console_write_dec(int value);
+void console_write_hex(uint32_t value);
 
 void console_put_char_at(char c, size_t row, size_t col, uint8_t color);
 void console_write_at(const char* str, size_t row, size_t col, uint8_t color);

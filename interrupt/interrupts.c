@@ -205,6 +205,7 @@ static uint16_t read_cs(void) {
 
 static void pic_remap(void) {
     /* 先保存原屏蔽位，避免重映射时把原本的使能状态弄丢。 */
+    // 通过PICX_DATA这个端口去访问IMR(interrupt mask register)，读取中断屏蔽寄存器
     uint8_t mask1 = inb(PIC1_DATA);
     uint8_t mask2 = inb(PIC2_DATA);
     //初始化的时候发四个ICW，第一个发到命令端口，后三个发到数据端口
@@ -258,7 +259,7 @@ static void pic_set_masks(uint8_t master_mask, uint8_t slave_mask) {
     outb(PIC2_DATA, slave_mask);
 }
 
-static void pic_send_eoi(uint8_t irq) {
+static void pic_send_eoi(uint8_t irq) { 
     /*
      * 如果是从 PIC（IRQ8~15）发来的中断，需要先通知从片，
      * 再通知主片。否则 PIC 会认为这条中断还没处理完。
@@ -269,7 +270,7 @@ static void pic_send_eoi(uint8_t irq) {
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
-static void kernel_panic(InterruptFrame* frame) {
+static void kernel_panic(InterruptFrame* frame) { // 发生无法处理的内核错误，打印错误信息并停机
     console_set_color(0x0F, 0x04);
     console_write_line("");
     console_write_line("KERNEL PANIC");

@@ -17,7 +17,28 @@ static volatile uint32_t timer_ticks = 0;
 static volatile uint32_t timer_frequency = 100;
 static volatile uint32_t timeslice_ticks = 10;
 static volatile uint32_t slice_remaining = 10;
-static volatile int schedule_event_pending = 0;
+static volatile uint32_t schedule_event_pending = 0;
+
+static uint32_t interrupt_save_and_disable(void) {
+    uint32_t flags;
+    __asm__ __volatile__(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory");
+    return flags;
+}
+
+static void interrupt_restore(uint32_t flags) {
+    __asm__ __volatile__(
+        "pushl %0\n\t"
+        "popfl"
+        :
+        : "r"(flags)
+        : "memory", "cc");
+}
 
 static void timer_irq_handler(InterruptFrame* frame) {
     (void)frame;
@@ -34,7 +55,7 @@ static void timer_irq_handler(InterruptFrame* frame) {
      * 这样后续你做 RR 调度时，可以把真正的切换逻辑接在这里后面。
      */
     if (slice_remaining == 0) {
-        schedule_event_pending = 1;
+        schedule_event_pending++;
         slice_remaining = timeslice_ticks;
     }
 }
@@ -93,11 +114,18 @@ uint32_t timer_get_timeslice(void) {
 }
 
 int timer_take_schedule_event(void) {
-    /* 主循环拿走这个事件后，就把它清零，避免重复调度。 */
-    if (!schedule_event_pending) {
+    /*
+     * 这里要把“检查 + 消费”放进同一个临界区里，
+     * 否则可能在两步之间被时钟中断打断，导致丢掉一次调度事件。
+     */
+    uint32_t flags = interrupt_save_and_disable();
+
+    if (schedule_event_pending == 0) {
+        interrupt_restore(flags);
         return 0;
     }
 
-    schedule_event_pending = 0;
+    schedule_event_pending--;
+    interrupt_restore(flags);
     return 1;
 }

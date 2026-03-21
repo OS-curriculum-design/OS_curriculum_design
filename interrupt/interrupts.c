@@ -370,11 +370,10 @@ void interrupts_init(void) {
      * - IRQ0(时钟)、IRQ1(键盘)、IRQ2(级联到从 PIC) 允许
      * - 其余 IRQ3~7 暂时屏蔽
      *
-     * 从 PIC mask = 0xEF = 1110 1111b
-     * - 只有 IRQ12（鼠标，对应从片的 bit4）允许
-     * - 其余 IRQ8~15 暂时屏蔽
+     * 从 PIC mask = 0xFF = 1111 1111b
+     * - IRQ8~15 暂时全部屏蔽
      */
-    pic_set_masks(0xF8, 0xEF);
+    pic_set_masks(0xF8, 0xFF);
 }
 
 void interrupts_enable(void) {

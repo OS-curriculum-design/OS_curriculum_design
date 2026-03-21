@@ -10,7 +10,6 @@ C_SOURCES = \
 	console/console.c \
 	interrupt/interrupts.c \
 	drivers/keyboard.c \
-	drivers/mouse.c \
 	include/string.c \
 	shell/shell.c \
 	timer/timer.c

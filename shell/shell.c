@@ -1,6 +1,5 @@
 #include "shell.h"
 #include "../console/console.h"
-#include "../drivers/mouse.h"
 #include "../include/string.h"
 #include "../timer/timer.h"
 
@@ -38,34 +37,6 @@ static void run_command(const char* cmd) {
 
     if (strcmp(cmd, "clear") == 0) {
         console_clear();
-        return;
-    }
-
-    if (strcmp(cmd, "mouse") == 0) {
-        MouseState ms = mouse_get_state();
-        console_write("Mouse: x=");
-        console_write_dec(ms.x);
-        console_write(" y=");
-        console_write_dec(ms.y);
-        console_write(" left=");
-        console_write_dec(ms.left);
-        console_write(" right=");
-        console_write_dec(ms.right);
-        console_write(" middle=");
-        console_write_dec(ms.middle);
-        console_put_char('\n');
-        return;
-    }
-
-    if (strcmp(cmd, "mouse on") == 0) {
-        mouse_set_enabled(1);
-        console_write_line("Mouse enabled.");
-        return;
-    }
-
-    if (strcmp(cmd, "mouse off") == 0) {
-        mouse_set_enabled(0);
-        console_write_line("Mouse disabled.");
         return;
     }
 

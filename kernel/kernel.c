@@ -1,6 +1,5 @@
 #include "../console/console.h"
 #include "../drivers/keyboard.h"
-#include "../drivers/mouse.h"
 #include "../interrupt/interrupts.h"
 #include "gdt.h"
 #include "../shell/shell.h"
@@ -15,7 +14,6 @@ void kernel_main(void) {
 
     interrupts_init();
     keyboard_init();
-    mouse_init();
     timer_init(100);
     shell_init();
     interrupts_enable();

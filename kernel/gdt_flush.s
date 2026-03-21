@@ -3,17 +3,17 @@
 .global gdt_load
 
 gdt_load:
-    movl 4(%esp), %eax//将参数传入eax
-    lgdt (%eax)//将eax中的值装入gdtr
+    movl 4(%esp), %eax
+    lgdt (%eax)
 
-    movw $0x10, %ax//内核数据段
+    movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %fs
     movw %ax, %gs
     movw %ax, %ss
 
-    ljmp $0x08, $1f//内核指令段
+    ljmp $0x08, $1f
 1:
     ret
 

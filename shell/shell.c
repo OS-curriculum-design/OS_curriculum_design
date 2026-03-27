@@ -1,6 +1,7 @@
 #include "shell.h"
 #include "../console/console.h"
 #include "../include/string.h"
+#include "../mm/pmm.h"
 #include "../timer/timer.h"
 
 // Shell 当前支持的单行输入最大长度。
@@ -15,6 +16,36 @@ static char input_buffer[INPUT_MAX];
 // 记录当前输入缓冲区中已经存放了多少个字符。
 // 它始终指向下一次写入的位置。
 static int input_len = 0;
+
+static void print_memory_stats(void) {
+    console_write("Physical memory: ");
+    console_write_dec((int)(pmm_get_total_memory_bytes() / (1024U * 1024U)));
+    console_write_line(" MiB");
+
+    console_write("Page size: ");
+    console_write_dec((int)PAGE_SIZE);
+    console_write_line(" bytes");
+
+    console_write("Total pages: ");
+    console_write_dec((int)pmm_get_total_pages());
+    console_put_char('\n');
+
+    console_write("Used pages: ");
+    console_write_dec((int)pmm_get_used_pages());
+    console_put_char('\n');
+
+    console_write("Free pages: ");
+    console_write_dec((int)pmm_get_free_pages());
+    console_put_char('\n');
+
+    console_write("Bitmap base: ");
+    console_write_hex(pmm_get_bitmap_base());
+    console_put_char('\n');
+
+    console_write("Bitmap size: ");
+    console_write_dec((int)pmm_get_bitmap_size_bytes());
+    console_write_line(" bytes");
+}
 
 // 将一个十进制数字字符串解析为无符号 32 位整数。
 //
@@ -89,6 +120,17 @@ static void run_command(const char* cmd) {
         console_write("Timer ticks: ");
         console_write_dec((int)timer_get_ticks());
         console_put_char('\n');
+        return;
+    }
+
+    // mem：显示物理页位图管理器的当前状态。
+    if (strcmp(cmd, "mem") == 0) {
+        if (!pmm_is_ready()) {
+            console_write_line("Physical memory manager is not ready.");
+            return;
+        }
+
+        print_memory_stats();
         return;
     }
 

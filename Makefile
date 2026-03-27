@@ -7,6 +7,7 @@ LDFLAGS = -m elf_i386 -T linker.ld
 C_SOURCES = \
 	kernel/gdt.c \
 	kernel/kernel.c \
+	mm/pmm.c \
 	console/console.c \
 	interrupt/interrupts.c \
 	drivers/keyboard.c \
@@ -48,6 +49,9 @@ interrupt/%.o: interrupt/%.c
 timer/%.o: timer/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+mm/%.o: mm/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 myos.bin: boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS)
 
@@ -61,10 +65,10 @@ myos.iso: iso/boot/myos.bin iso/boot/grub/grub.cfg
 	grub-mkrescue -o myos.iso iso
 
 run: all
-	qemu-system-i386 -cdrom myos.iso
+	qemu-system-i386 -m 128M -cdrom myos.iso
 
 clean:
-	rm -f boot/*.o kernel/*.o console/*.o interrupt/*.o drivers/*.o include/*.o shell/*.o timer/*.o
+	rm -f boot/*.o kernel/*.o mm/*.o console/*.o interrupt/*.o drivers/*.o include/*.o shell/*.o timer/*.o
 	rm -f myos.bin myos.iso iso/boot/myos.bin
 
 .PHONY: all check run clean

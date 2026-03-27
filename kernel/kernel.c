@@ -1,16 +1,19 @@
 #include "../console/console.h"
 #include "../drivers/keyboard.h"
 #include "../interrupt/interrupts.h"
+#include "../mm/pmm.h"
 #include "gdt.h"
 #include "../shell/shell.h"
 #include "../timer/timer.h"
 
-void kernel_main(void) {
+void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     interrupts_disable();
     gdt_init();
 
     console_set_color(0x0F, 0x00);
     console_clear();
+
+    pmm_init(multiboot_magic, multiboot_info_addr);
 
     interrupts_init();
     keyboard_init();

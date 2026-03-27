@@ -11,6 +11,8 @@
 
 _start:
     mov $stack_top, %esp
+    push %ebx
+    push %eax
     call kernel_main
 
 halt:

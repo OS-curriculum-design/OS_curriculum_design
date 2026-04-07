@@ -7,7 +7,9 @@ LDFLAGS = -m elf_i386 -T linker.ld
 C_SOURCES = \
 	kernel/gdt.c \
 	kernel/kernel.c \
+	kernel/usermode.c \
 	mm/pmm.c \
+	mm/vmm.c \
 	console/console.c \
 	interrupt/interrupts.c \
 	drivers/keyboard.c \
@@ -26,6 +28,9 @@ kernel/gdt_flush.o: kernel/gdt_flush.s
 	$(CC) -m32 -c $< -o $@
 
 interrupt/interrupt_stubs.o: interrupt/interrupt_stubs.s
+	$(CC) -m32 -c $< -o $@
+
+kernel/usermode_switch.o: kernel/usermode_switch.s
 	$(CC) -m32 -c $< -o $@
 
 kernel/%.o: kernel/%.c
@@ -52,8 +57,8 @@ timer/%.o: timer/%.c
 mm/%.o: mm/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-myos.bin: boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot/boot.o kernel/gdt_flush.o interrupt/interrupt_stubs.o $(C_OBJECTS)
+myos.bin: boot/boot.o kernel/gdt_flush.o kernel/usermode_switch.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot/boot.o kernel/gdt_flush.o kernel/usermode_switch.o interrupt/interrupt_stubs.o $(C_OBJECTS)
 
 check: myos.bin
 	grub-file --is-x86-multiboot myos.bin

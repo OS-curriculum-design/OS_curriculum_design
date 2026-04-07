@@ -1,6 +1,7 @@
 #include "interrupts.h"
 #include "../console/console.h"
 #include "../drivers/io.h"
+#include "../kernel/usermode.h"
 
 /*
  * x86 IDT 一共有 256 个中断向量槽位，编号 0~255。
@@ -124,6 +125,7 @@ extern void irq12(void);
 extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
+extern void isr128(void);
 //硬件中断请求（如键盘输入）
 static IdtEntry idt[IDT_ENTRIES];
 static IdtPointer idt_ptr;
@@ -400,6 +402,15 @@ void interrupts_init(void) {
     idt_set_gate(IRQ_BASE + 14, (uint32_t)irq14, kernel_code_selector, 0x8E);
     idt_set_gate(IRQ_BASE + 15, (uint32_t)irq15, kernel_code_selector, 0x8E);
 
+    /*
+     * 0x80：演示用系统调用入口。
+     * type_attr = 0xEE:
+     * - P=1
+     * - DPL=3，允许用户态通过 int 0x80 主动进入
+     * - 32 位中断门
+     */
+    idt_set_gate(0x80, (uint32_t)isr128, kernel_code_selector, 0xEE);
+
     /* 初始时所有 IRQ 都还没有注册 C 处理函数。 */
     for (size_t irq = 0; irq < 16; irq++) {
         irq_handlers[irq] = 0;
@@ -438,6 +449,11 @@ void irq_register_handler(uint8_t irq, irq_handler_t handler) {
 }
 
 void isr_dispatch(InterruptFrame* frame) {
+    if (frame->int_no == 0x80) {
+        usermode_handle_syscall(frame);
+        return;
+    }
+
     /* 小于 32 的向量号表示 CPU 异常。 */
     if (frame->int_no < IRQ_BASE) {
         kernel_panic(frame);//控制台报错，系统停止

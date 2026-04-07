@@ -2,6 +2,7 @@
 #include "../drivers/keyboard.h"
 #include "../interrupt/interrupts.h"
 #include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include "gdt.h"
 #include "../shell/shell.h"
 #include "../timer/timer.h"
@@ -14,6 +15,12 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     console_clear();
 
     pmm_init(multiboot_magic, multiboot_info_addr);
+    if (!vmm_init()) {
+        console_write_line("VMM init failed.");
+        while (1) {
+            __asm__ __volatile__("hlt");
+        }
+    }
 
     interrupts_init();
     keyboard_init();

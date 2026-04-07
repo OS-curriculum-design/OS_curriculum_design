@@ -76,12 +76,20 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
+ISR_NOERR 128
+
 isr_common_stub:
     pusha
     pushl %ds
     pushl %es
     pushl %fs
     pushl %gs
+
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
 
     pushl %esp
     call isr_dispatch

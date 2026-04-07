@@ -1,6 +1,7 @@
 .section .text
 .code32
 .global gdt_load
+.global tss_load
 
 gdt_load:
     movl 4(%esp), %eax
@@ -15,6 +16,11 @@ gdt_load:
 
     ljmp $0x08, $1f
 1:
+    ret
+
+tss_load:
+    movw $0x28, %ax
+    ltr %ax
     ret
 
 .section .note.GNU-stack,"",@progbits

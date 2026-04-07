@@ -1,7 +1,9 @@
 #include "shell.h"
 #include "../console/console.h"
 #include "../include/string.h"
+#include "../kernel/usermode.h"
 #include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include "../timer/timer.h"
 
 // Shell 当前支持的单行输入最大长度。
@@ -16,6 +18,9 @@ static char input_buffer[INPUT_MAX];
 // 记录当前输入缓冲区中已经存放了多少个字符。
 // 它始终指向下一次写入的位置。
 static int input_len = 0;
+
+static int demo_user_space_ready = 0;
+static VmmUserSpaceInfo demo_user_space;
 
 static void print_memory_stats(void) {
     console_write("Physical memory: ");
@@ -45,6 +50,88 @@ static void print_memory_stats(void) {
     console_write("Bitmap size: ");
     console_write_dec((int)pmm_get_bitmap_size_bytes());
     console_write_line(" bytes");
+
+    console_write("Paging: ");
+    console_write_line(vmm_is_paging_enabled() ? "enabled" : "disabled");
+
+    console_write("Page directory: ");
+    console_write_hex(vmm_get_page_directory());
+    console_put_char('\n');
+
+    console_write("Kernel base: ");
+    console_write_hex(VMM_KERNEL_BASE);
+    console_put_char('\n');
+
+    console_write("Identity mapped: ");
+    console_write_dec((int)(vmm_get_identity_mapped_bytes() / (1024U * 1024U)));
+    console_write_line(" MiB");
+
+    console_write("Kernel mapped: ");
+    console_write_dec((int)(vmm_get_kernel_mapped_bytes() / (1024U * 1024U)));
+    console_write_line(" MiB");
+
+    console_write("Mapped pages: ");
+    console_write_dec((int)vmm_get_mapped_pages());
+    console_put_char('\n');
+}
+
+static void print_user_vm_demo(void) {
+    uint32_t resolved_phys = 0;
+
+    if (!vmm_is_ready()) {
+        console_write_line("Virtual memory manager is not ready.");
+        return;
+    }
+
+    if (!demo_user_space_ready) {
+        if (!vmm_create_user_demo_space(&demo_user_space)) {
+            console_write_line("Failed to create user address space.");
+            return;
+        }
+        demo_user_space_ready = 1;
+    }
+
+    console_write_line("User address space demo:");
+
+    console_write("  page directory: ");
+    console_write_hex(demo_user_space.page_directory_phys);
+    console_put_char('\n');
+
+    console_write("  user range: 0x00000000 - ");
+    console_write_hex(VMM_USER_TOP - 1U);
+    console_put_char('\n');
+
+    console_write("  kernel range: ");
+    console_write_hex(VMM_KERNEL_BASE);
+    console_write_line(" - 0xFFFFFFFF");
+
+    console_write("  code: ");
+    console_write_hex(demo_user_space.code_virt);
+    console_write(" -> ");
+    if (vmm_get_mapping_in_directory(demo_user_space.page_directory_phys,
+                                     demo_user_space.code_virt,
+                                     &resolved_phys)) {
+        console_write_hex(resolved_phys);
+    } else {
+        console_write("not mapped");
+    }
+    console_put_char('\n');
+
+    console_write("  stack page: ");
+    console_write_hex(demo_user_space.stack_page_virt);
+    console_write(" -> ");
+    if (vmm_get_mapping_in_directory(demo_user_space.page_directory_phys,
+                                     demo_user_space.stack_page_virt,
+                                     &resolved_phys)) {
+        console_write_hex(resolved_phys);
+    } else {
+        console_write("not mapped");
+    }
+    console_put_char('\n');
+
+    console_write("  initial user esp: ");
+    console_write_hex(demo_user_space.stack_top);
+    console_put_char('\n');
 }
 
 // 将一个十进制数字字符串解析为无符号 32 位整数。
@@ -131,6 +218,29 @@ static void run_command(const char* cmd) {
         }
 
         print_memory_stats();
+        return;
+    }
+
+    // uservm：创建并显示一个用户虚拟地址空间示例。
+    // 这里只做页表布局验证，还不会真正切换到用户态执行。
+    if (strcmp(cmd, "uservm") == 0) {
+        print_user_vm_demo();
+        return;
+    }
+
+    // ring3：真正通过 iret 进入用户态，并用 int 0x80 返回内核。
+    if (strcmp(cmd, "ring3") == 0) {
+        uint32_t result;
+
+        console_write_line("Entering ring3 demo...");
+        result = usermode_run_demo();
+        if (result == 0) {
+            console_write_line("ring3 demo failed.");
+        } else {
+            console_write("Back from ring3, eax=");
+            console_write_hex(result);
+            console_put_char('\n');
+        }
         return;
     }
 

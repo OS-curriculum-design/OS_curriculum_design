@@ -1,6 +1,8 @@
 #include "../console/console.h"
+#include "../drivers/ata.h"
 #include "../drivers/keyboard.h"
 #include "../interrupt/interrupts.h"
+#include "../mm/pager.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "gdt.h"
@@ -23,6 +25,8 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     }
 
     interrupts_init();
+    ata_init();
+    pager_init();
     keyboard_init();
     timer_init(100);
     shell_init();

@@ -9,9 +9,11 @@ C_SOURCES = \
 	kernel/kernel.c \
 	kernel/usermode.c \
 	mm/pmm.c \
+	mm/pager.c \
 	mm/vmm.c \
 	console/console.c \
 	interrupt/interrupts.c \
+	drivers/ata.c \
 	drivers/keyboard.c \
 	include/string.c \
 	shell/shell.c \
@@ -69,8 +71,11 @@ iso/boot/myos.bin: myos.bin
 myos.iso: iso/boot/myos.bin iso/boot/grub/grub.cfg
 	grub-mkrescue -o myos.iso iso
 
-run: all
-	qemu-system-i386 -m 128M -cdrom myos.iso
+disk.img:
+	dd if=/dev/zero of=disk.img bs=1M count=16
+
+run: all disk.img
+	qemu-system-i386 -m 128M -boot d -cdrom myos.iso -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 
 clean:
 	rm -f boot/*.o kernel/*.o mm/*.o console/*.o interrupt/*.o drivers/*.o include/*.o shell/*.o timer/*.o

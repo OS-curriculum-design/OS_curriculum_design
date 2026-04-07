@@ -55,6 +55,10 @@ static void* phys_to_virt(uint32_t phys_addr) {
     return (void*)(VMM_KERNEL_BASE + phys_addr);
 }
 
+void* vmm_phys_to_virt(uint32_t phys_addr) {
+    return phys_to_virt(phys_addr);
+}
+
 static int map_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags, int count_mapping) {
     uint32_t directory_index;
     uint32_t table_index;
@@ -165,6 +169,53 @@ int vmm_get_mapping(uint32_t virt_addr, uint32_t* phys_addr_out) {
     }
 
     *phys_addr_out = (entry & PAGE_ADDR_MASK) | (virt_addr & ~PAGE_ADDR_MASK);
+    return 1;
+}
+
+int vmm_get_page_entry(uint32_t virt_addr, uint32_t* entry_out) {
+    uint32_t directory_index;
+    uint32_t table_index;
+    uint32_t* page_table;
+
+    if (current_page_directory == (uint32_t*)0 || entry_out == (uint32_t*)0) {
+        return 0;
+    }
+
+    directory_index = page_directory_index(virt_addr);
+    table_index = page_table_index(virt_addr);
+
+    if (!(current_page_directory[directory_index] & PAGE_PRESENT)) {
+        return 0;
+    }
+
+    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(current_page_directory[directory_index]));
+    *entry_out = page_table[table_index];
+    return 1;
+}
+
+int vmm_clear_page_accessed(uint32_t virt_addr) {
+    uint32_t directory_index;
+    uint32_t table_index;
+    uint32_t* page_table;
+
+    if (current_page_directory == (uint32_t*)0) {
+        return 0;
+    }
+
+    directory_index = page_directory_index(virt_addr);
+    table_index = page_table_index(virt_addr);
+
+    if (!(current_page_directory[directory_index] & PAGE_PRESENT)) {
+        return 0;
+    }
+
+    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(current_page_directory[directory_index]));
+    if (!(page_table[table_index] & PAGE_PRESENT)) {
+        return 0;
+    }
+
+    page_table[table_index] &= ~VMM_PAGE_ACCESSED;
+    invalidate_page(virt_addr);
     return 1;
 }
 

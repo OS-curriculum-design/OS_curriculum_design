@@ -1,7 +1,9 @@
 #include "shell.h"
 #include "../console/console.h"
+#include "../drivers/ata.h"
 #include "../include/string.h"
 #include "../kernel/usermode.h"
+#include "../mm/pager.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../timer/timer.h"
@@ -10,6 +12,8 @@
 // 这里预留 1 个字节给字符串结束符 '\0'，
 // 因此用户实际最多只能输入 127 个可见字符。
 #define INPUT_MAX 128
+#define PAGER_TEST_BASE 0x40000000U
+#define PAGER_TEST_PAGE_COUNT 20U
 
 // 保存用户当前正在输入的一整行命令。
 // 这是一个静态全局缓冲区，Shell 按“整行输入、回车执行”的方式工作。
@@ -21,6 +25,35 @@ static int input_len = 0;
 
 static int demo_user_space_ready = 0;
 static VmmUserSpaceInfo demo_user_space;
+
+static void run_pager_fault_test(void) {
+    if (!pager_is_ready()) {
+        console_write_line("pager is not ready");
+        return;
+    }
+
+    console_write_line("Pager fault test using real #PF");
+    for (uint32_t i = 0; i < PAGER_TEST_PAGE_COUNT; i++) {
+        if (!pager_register_page(PAGER_TEST_BASE + i * PAGE_SIZE, VMM_PAGE_WRITABLE)) {
+            console_write_line("pager test: register failed");
+            return;
+        }
+    }
+
+    console_write_line("access pattern: pages 0..19, then 0..3");
+
+    for (uint32_t i = 0; i < PAGER_TEST_PAGE_COUNT; i++) {
+        uint32_t* ptr = (uint32_t*)(PAGER_TEST_BASE + i * PAGE_SIZE);
+        *ptr = 0xC1000000U | i;
+    }
+
+    for (uint32_t i = 0; i < 4U; i++) {
+        uint32_t* ptr = (uint32_t*)(PAGER_TEST_BASE + i * PAGE_SIZE);
+        *ptr = 0xC1001000U | i;
+    }
+
+    pager_print_stats();
+}
 
 static void print_memory_stats(void) {
     console_write("Physical memory: ");
@@ -73,6 +106,9 @@ static void print_memory_stats(void) {
     console_write("Mapped pages: ");
     console_write_dec((int)vmm_get_mapped_pages());
     console_put_char('\n');
+
+    console_write("ATA disk: ");
+    console_write_line(ata_is_ready() ? "ready" : "not ready");
 }
 
 static void print_user_vm_demo(void) {
@@ -241,6 +277,18 @@ static void run_command(const char* cmd) {
             console_write_hex(result);
             console_put_char('\n');
         }
+        return;
+    }
+
+    // pager：显示通用换页器状态。
+    if (strcmp(cmd, "pager") == 0) {
+        pager_print_stats();
+        return;
+    }
+
+    // pagertest：用真实 #PF 触发通用换页器。
+    if (strcmp(cmd, "pagertest") == 0) {
+        run_pager_fault_test();
         return;
     }
 

@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../drivers/io.h"
 #include "../kernel/usermode.h"
+#include "../mm/pager.h"
 
 /*
  * x86 IDT 一共有 256 个中断向量槽位，编号 0~255。
@@ -452,6 +453,12 @@ void isr_dispatch(InterruptFrame* frame) {
     if (frame->int_no == 0x80) {
         usermode_handle_syscall(frame);
         return;
+    }
+
+    if (frame->int_no == 14) {
+        if (pager_handle_page_fault(read_cr2(), frame->err_code)) {
+            return;
+        }
     }
 
     /* 小于 32 的向量号表示 CPU 异常。 */

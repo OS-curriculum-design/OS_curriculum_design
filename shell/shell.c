@@ -1,6 +1,7 @@
 #include "shell.h"
 #include "../console/console.h"
 #include "../drivers/ata.h"
+#include "../fs/simplefs.h"
 #include "../include/string.h"
 #include "../kernel/process.h"
 #include "../kernel/usermode.h"
@@ -26,6 +27,7 @@ static int input_len = 0;
 static int prompt_visible = 0;
 static int async_output_active = 0;
 static int async_output_dirty = 0;
+static uint8_t fs_command_buffer[SIMPLEFS_MAX_FILE_SIZE + 1U];
 
 static int demo_user_space_ready = 0;
 static VmmUserSpaceInfo demo_user_space;
@@ -225,6 +227,75 @@ static uint32_t ticks_to_ms(uint32_t ticks) {
     return (ticks * 1000U) / frequency;
 }
 
+static const char* skip_spaces(const char* str) {
+    while (*str == ' ') {
+        str++;
+    }
+
+    return str;
+}
+
+static int parse_leading_uint(const char** str_io, uint32_t* out) {
+    const char* str = skip_spaces(*str_io);
+    uint32_t value = 0;
+
+    if (*str < '0' || *str > '9') {
+        return 0;
+    }
+
+    while (*str >= '0' && *str <= '9') {
+        value = value * 10U + (uint32_t)(*str - '0');
+        str++;
+    }
+
+    *out = value;
+    *str_io = str;
+    return 1;
+}
+
+static int split_name_and_text(const char* args, char* name_out, uint32_t name_size, const char** text_out) {
+    uint32_t i = 0;
+
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        return 0;
+    }
+
+    while (args[i] && args[i] != ' ') {
+        if (i + 1U >= name_size) {
+            return 0;
+        }
+        name_out[i] = args[i];
+        i++;
+    }
+    name_out[i] = '\0';
+
+    *text_out = skip_spaces(args + i);
+    return 1;
+}
+
+static void fs_print_mount_hint(void) {
+    if (!simplefs_is_mounted()) {
+        console_write_line("SimpleFS is not mounted. Run mkfs first.");
+    }
+}
+
+static void print_help(void) {
+    console_write_line("Core:");
+    console_write_line("  help clear ticks mem uservm ring3 pager pagertest");
+    console_write_line("Process:");
+    console_write_line("  ps run <app> spawn <app> sched autosched [on|off] reap slice [ticks]");
+    console_write_line("  apps: hello counter busy");
+    console_write_line("Files:");
+    console_write_line("  mkfs fsstat pwd ls mkdir <dir> cd <dir|..|/> rmdir <dir>");
+    console_write_line("  touch <file> rm <file> cat <file> write <file> <text>");
+    console_write_line("  append <file> <text> edit <file> <text>");
+    console_write_line("FD:");
+    console_write_line("  open <file> close <fd> fds read <fd> writefd <fd> <text> seek <fd> <offset>");
+    console_write_line("Apps on FS:");
+    console_write_line("  installapps exec <file.app>");
+}
+
 // 执行一条已经输入完成的命令字符串。
 //
 // 这里采用最直接的字符串比较方式来分发命令，
@@ -239,6 +310,12 @@ static void run_command(const char* cmd) {
     // clear：清空整个屏幕。
     if (strcmp(cmd, "clear") == 0) {
         console_clear();
+        return;
+    }
+
+    // help：显示当前 shell 支持的主要命令。
+    if (strcmp(cmd, "help") == 0) {
+        print_help();
         return;
     }
 
@@ -258,6 +335,296 @@ static void run_command(const char* cmd) {
         }
 
         print_memory_stats();
+        return;
+    }
+
+    // mkfs：在 disk.img 的 SimpleFS 区域上格式化根文件系统。
+    if (strcmp(cmd, "mkfs") == 0) {
+        console_write_line(simplefs_format() ? "SimpleFS formatted." : "mkfs failed.");
+        return;
+    }
+
+    // ls：列出根目录文件。
+    if (strcmp(cmd, "ls") == 0) {
+        simplefs_list();
+        return;
+    }
+
+    // fsstat：显示 SimpleFS 状态。
+    if (strcmp(cmd, "fsstat") == 0) {
+        simplefs_print_stats();
+        return;
+    }
+
+    // pwd：显示当前目录。
+    if (strcmp(cmd, "pwd") == 0) {
+        simplefs_print_working_directory();
+        return;
+    }
+
+    // mkdir <name>：创建当前目录下的子目录。
+    if (strncmp(cmd, "mkdir ", 6) == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            console_write_line(simplefs_make_dir(skip_spaces(cmd + 6)) ? "directory created." : "mkdir failed.");
+        }
+        return;
+    }
+
+    // rmdir <name>：删除当前目录下的空目录。
+    if (strncmp(cmd, "rmdir ", 6) == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            console_write_line(simplefs_remove_dir(skip_spaces(cmd + 6)) ? "directory removed." : "rmdir failed.");
+        }
+        return;
+    }
+
+    // cd <name|..|/>：切换当前目录。
+    if (strncmp(cmd, "cd ", 3) == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            console_write_line(simplefs_change_dir(skip_spaces(cmd + 3)) ? "directory changed." : "cd failed.");
+        }
+        return;
+    }
+
+    // touch <name>：创建空文本文件。
+    if (strncmp(cmd, "touch ", 6) == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            console_write_line(simplefs_create(skip_spaces(cmd + 6)) ? "file created." : "touch failed.");
+        }
+        return;
+    }
+
+    // rm <name>：删除文件。
+    if (strncmp(cmd, "rm ", 3) == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            console_write_line(simplefs_delete(skip_spaces(cmd + 3)) ? "file removed." : "rm failed.");
+        }
+        return;
+    }
+
+    // cat <name>：打印文本文件内容。
+    if (strncmp(cmd, "cat ", 4) == 0) {
+        uint32_t bytes_read = 0;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (simplefs_read_file(skip_spaces(cmd + 4), fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &bytes_read)) {
+                fs_command_buffer[bytes_read] = '\0';
+                console_write((const char*)fs_command_buffer);
+                if (bytes_read == 0 || fs_command_buffer[bytes_read - 1U] != '\n') {
+                    console_put_char('\n');
+                }
+            } else {
+                console_write_line("cat failed.");
+            }
+        }
+        return;
+    }
+
+    // write <name> <text>：覆盖写入文本文件。
+    if (strncmp(cmd, "write ", 6) == 0) {
+        char name[28];
+        const char* text;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (split_name_and_text(cmd + 6, name, sizeof(name), &text) &&
+                simplefs_write_file(name, (const uint8_t*)text, (uint32_t)strlen(text))) {
+                console_write_line("file written.");
+            } else {
+                console_write_line("Usage: write <name> <text>");
+            }
+        }
+        return;
+    }
+
+    // append <name> <text>：追加文本。
+    if (strncmp(cmd, "append ", 7) == 0) {
+        char name[28];
+        const char* text;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (split_name_and_text(cmd + 7, name, sizeof(name), &text) &&
+                simplefs_append_file(name, (const uint8_t*)text, (uint32_t)strlen(text))) {
+                console_write_line("file appended.");
+            } else {
+                console_write_line("Usage: append <name> <text>");
+            }
+        }
+        return;
+    }
+
+    // edit <name> <text>：第一版简化编辑器，本质是覆盖写入文本。
+    if (strncmp(cmd, "edit ", 5) == 0) {
+        char name[28];
+        const char* text;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (split_name_and_text(cmd + 5, name, sizeof(name), &text) &&
+                simplefs_write_file(name, (const uint8_t*)text, (uint32_t)strlen(text))) {
+                console_write_line("file edited.");
+            } else {
+                console_write_line("Usage: edit <name> <text>");
+            }
+        }
+        return;
+    }
+
+    // installapps：把当前内置用户程序镜像写入 SimpleFS。
+    if (strcmp(cmd, "installapps") == 0) {
+        uint32_t image_size = 0;
+        int ok = 1;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!process_build_builtin_image("hello", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("hello.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("counter", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("counter.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("busy", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("busy.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+
+            console_write_line(ok ? "apps installed." : "installapps failed.");
+        }
+        return;
+    }
+
+    // exec <file.app>：从 SimpleFS 读取程序镜像并创建进程。
+    if (strncmp(cmd, "exec ", 5) == 0) {
+        uint32_t image_size = 0;
+        int pid;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!simplefs_read_file(skip_spaces(cmd + 5), fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) || image_size == 0) {
+                console_write_line("exec failed: cannot read app.");
+                return;
+            }
+
+            pid = process_spawn_from_buffer(skip_spaces(cmd + 5), fs_command_buffer, image_size);
+            if (pid == 0) {
+                console_write_line("exec failed: cannot create process.");
+                return;
+            }
+
+            console_write("created process pid=");
+            console_write_dec(pid);
+            console_put_char('\n');
+        }
+        return;
+    }
+
+    // open <name> / close <fd> / fds：演示打开文件表。
+    if (strncmp(cmd, "open ", 5) == 0) {
+        int fd;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            fd = simplefs_open(skip_spaces(cmd + 5));
+            if (fd >= 0) {
+                console_write("fd=");
+                console_write_dec(fd);
+                console_put_char('\n');
+            } else {
+                console_write_line("open failed.");
+            }
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "close ", 6) == 0) {
+        uint32_t fd = 0;
+
+        if (!parse_uint(skip_spaces(cmd + 6), &fd)) {
+            console_write_line("Usage: close <fd>");
+            return;
+        }
+
+        console_write_line(simplefs_close((int)fd) ? "file closed." : "close failed.");
+        return;
+    }
+
+    if (strcmp(cmd, "fds") == 0) {
+        simplefs_print_open_files();
+        return;
+    }
+
+    // read <fd>：从当前 fd 偏移读到文件末尾，并推进 fd offset。
+    if (strncmp(cmd, "read ", 5) == 0) {
+        uint32_t fd = 0;
+        uint32_t bytes_read = 0;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_uint(skip_spaces(cmd + 5), &fd)) {
+                console_write_line("Usage: read <fd>");
+                return;
+            }
+
+            if (simplefs_read_fd((int)fd, fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &bytes_read)) {
+                fs_command_buffer[bytes_read] = '\0';
+                console_write((const char*)fs_command_buffer);
+                if (bytes_read == 0 || fs_command_buffer[bytes_read - 1U] != '\n') {
+                    console_put_char('\n');
+                }
+            } else {
+                console_write_line("read failed.");
+            }
+        }
+        return;
+    }
+
+    // writefd <fd> <text>：从当前 fd 偏移写入文本，并推进 fd offset。
+    if (strncmp(cmd, "writefd ", 8) == 0) {
+        const char* args = cmd + 8;
+        const char* text;
+        uint32_t fd = 0;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_leading_uint(&args, &fd)) {
+                console_write_line("Usage: writefd <fd> <text>");
+                return;
+            }
+
+            text = skip_spaces(args);
+            if (simplefs_write_fd((int)fd, (const uint8_t*)text, (uint32_t)strlen(text))) {
+                console_write_line("fd written.");
+            } else {
+                console_write_line("writefd failed.");
+            }
+        }
+        return;
+    }
+
+    // seek <fd> <offset>：调整 fd 的当前读写偏移。
+    if (strncmp(cmd, "seek ", 5) == 0) {
+        const char* args = cmd + 5;
+        uint32_t fd = 0;
+        uint32_t offset = 0;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_leading_uint(&args, &fd) || !parse_leading_uint(&args, &offset)) {
+                console_write_line("Usage: seek <fd> <offset>");
+                return;
+            }
+
+            console_write_line(simplefs_seek((int)fd, offset) ? "fd offset updated." : "seek failed.");
+        }
         return;
     }
 

@@ -13,6 +13,8 @@ typedef enum {
 
 void process_init(void);
 int process_spawn_builtin(const char* name);
+int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size);
+int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out);
 int process_schedule(void);
 int process_schedule_auto(void);
 int process_run_builtin(const char* name);

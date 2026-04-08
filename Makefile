@@ -16,6 +16,7 @@ C_SOURCES = \
 	interrupt/interrupts.c \
 	drivers/ata.c \
 	drivers/keyboard.c \
+	fs/simplefs.c \
 	include/string.c \
 	shell/shell.c \
 	timer/timer.c
@@ -43,6 +44,9 @@ console/%.o: console/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 drivers/%.o: drivers/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fs/%.o: fs/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 include/%.o: include/%.c
@@ -79,7 +83,7 @@ run: all disk.img
 	qemu-system-i386 -m 128M -boot d -cdrom myos.iso -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 
 clean:
-	rm -f boot/*.o kernel/*.o mm/*.o console/*.o interrupt/*.o drivers/*.o include/*.o shell/*.o timer/*.o
+	rm -f boot/*.o kernel/*.o mm/*.o console/*.o interrupt/*.o drivers/*.o fs/*.o include/*.o shell/*.o timer/*.o
 	rm -f myos.bin myos.iso iso/boot/myos.bin
 
 .PHONY: all check run clean

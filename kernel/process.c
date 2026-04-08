@@ -81,7 +81,7 @@ static Process* allocate_process(void) {
     return (Process*)0;
 }
 
-static int process_create_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
+int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
     Process* process;
     uint8_t* code_dst;
 
@@ -415,19 +415,11 @@ int process_spawn_builtin(const char* name) {
     uint32_t image_size;
     int pid;
 
-    if (strcmp(name, "hello") == 0) {
-        image_size = build_hello_image(image);
-        pid = process_create_from_buffer("hello", image, image_size);
-    } else if (strcmp(name, "counter") == 0) {
-        image_size = build_counter_image(image);
-        pid = process_create_from_buffer("counter", image, image_size);
-    } else if (strcmp(name, "busy") == 0) {
-        image_size = build_busy_image(image);
-        pid = process_create_from_buffer("busy", image, image_size);
-    } else {
-        pid = 0;
+    if (!process_build_builtin_image(name, image, sizeof(image), &image_size)) {
+        return 0;
     }
 
+    pid = process_spawn_from_buffer(name, image, image_size);
     if (pid == 0) {
         return 0;
     }
@@ -436,6 +428,27 @@ int process_spawn_builtin(const char* name) {
     console_write_dec(pid);
     console_put_char('\n');
     return pid;
+}
+
+int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out) {
+    uint32_t image_size;
+
+    if (image == (uint8_t*)0 || image_size_out == (uint32_t*)0 || image_capacity < PROCESS_IMAGE_MAX) {
+        return 0;
+    }
+
+    if (strcmp(name, "hello") == 0) {
+        image_size = build_hello_image(image);
+    } else if (strcmp(name, "counter") == 0) {
+        image_size = build_counter_image(image);
+    } else if (strcmp(name, "busy") == 0) {
+        image_size = build_busy_image(image);
+    } else {
+        return 0;
+    }
+
+    *image_size_out = image_size;
+    return 1;
 }
 
 int process_schedule(void) {

@@ -8,9 +8,11 @@
 #define PAGE_TABLE_ENTRIES 1024U
 #define CR0_PAGING 0x80000000U
 #define KERNEL_DIRECTORY_START (VMM_KERNEL_BASE >> 22)
+#define KERNEL_LOW_SHARED_DIRECTORIES 1U
 
 static uint32_t* current_page_directory = (uint32_t*)0;
 static uint32_t current_page_directory_phys = 0;
+static uint32_t kernel_page_directory_phys = 0;
 static uint32_t identity_mapped_bytes = 0;
 static uint32_t kernel_mapped_bytes = 0;
 static uint32_t mapped_pages = 0;
@@ -116,32 +118,42 @@ int vmm_map_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, 
     return map_page_in_directory(page_directory_phys, virt_addr, phys_addr, flags, 0);
 }
 
-void vmm_unmap_page(uint32_t virt_addr) {
+static void unmap_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, int count_mapping) {
     uint32_t directory_index;
     uint32_t table_index;
+    uint32_t* page_directory;
     uint32_t* page_table;
 
-    if (current_page_directory == (uint32_t*)0 || (virt_addr % PAGE_SIZE) != 0) {
+    if (page_directory_phys == 0 || (virt_addr % PAGE_SIZE) != 0) {
         return;
     }
 
+    page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
     directory_index = page_directory_index(virt_addr);
     table_index = page_table_index(virt_addr);
 
-    if (!(current_page_directory[directory_index] & PAGE_PRESENT)) {
+    if (!(page_directory[directory_index] & PAGE_PRESENT)) {
         return;
     }
 
-    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(current_page_directory[directory_index]));
+    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(page_directory[directory_index]));
     if (page_table[table_index] & PAGE_PRESENT) {
         page_table[table_index] = 0;
-        if (mapped_pages > 0) {
+        if (count_mapping && mapped_pages > 0) {
             mapped_pages--;
         }
-        if (paging_enabled) {
+        if (paging_enabled && page_directory_phys == current_page_directory_phys) {
             invalidate_page(virt_addr);
         }
     }
+}
+
+void vmm_unmap_page(uint32_t virt_addr) {
+    unmap_page_in_directory(current_page_directory_phys, virt_addr, 1);
+}
+
+void vmm_unmap_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr) {
+    unmap_page_in_directory(page_directory_phys, virt_addr, 0);
 }
 
 int vmm_get_mapping(uint32_t virt_addr, uint32_t* phys_addr_out) {
@@ -262,6 +274,7 @@ int vmm_init(void) {
     }
 
     current_page_directory = (uint32_t*)phys_to_virt(current_page_directory_phys);
+    kernel_page_directory_phys = current_page_directory_phys;
     memset(current_page_directory, 0, PAGE_SIZE);
 
     identity_mapped_bytes = pmm_get_total_memory_bytes() & PAGE_ADDR_MASK;
@@ -293,6 +306,7 @@ int vmm_init(void) {
 int vmm_create_address_space(uint32_t* page_directory_phys_out) {
     uint32_t new_page_directory_phys;
     uint32_t* new_page_directory;
+    uint32_t* kernel_page_directory;
 
     if (!vmm_ready || page_directory_phys_out == (uint32_t*)0) {
         return 0;
@@ -304,17 +318,43 @@ int vmm_create_address_space(uint32_t* page_directory_phys_out) {
     }
 
     new_page_directory = (uint32_t*)phys_to_virt(new_page_directory_phys);
+    kernel_page_directory = (uint32_t*)phys_to_virt(kernel_page_directory_phys);
     memset(new_page_directory, 0, PAGE_SIZE);
 
     /*
-     * 用户空间页目录项保持为空；内核空间页目录项直接共享当前内核映射。
+     * 低 4MiB 当前仍给内核入口、GDT/IDT、VGA、启动栈等使用；
+     * 高地址内核空间则共享 0xC0000000 以上的映射。
+     * 中间用户空间页目录项保持为空，供进程私有映射使用。
      */
+    for (uint32_t i = 0; i < KERNEL_LOW_SHARED_DIRECTORIES; i++) {
+        new_page_directory[i] = kernel_page_directory[i];
+    }
+
     for (uint32_t i = KERNEL_DIRECTORY_START; i < PAGE_TABLE_ENTRIES; i++) {
-        new_page_directory[i] = current_page_directory[i];
+        new_page_directory[i] = kernel_page_directory[i];
     }
 
     *page_directory_phys_out = new_page_directory_phys;
     return 1;
+}
+
+void vmm_destroy_address_space(uint32_t page_directory_phys) {
+    uint32_t* page_directory;
+
+    if (!vmm_ready || page_directory_phys == 0 || page_directory_phys == kernel_page_directory_phys) {
+        return;
+    }
+
+    page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
+
+    for (uint32_t i = KERNEL_LOW_SHARED_DIRECTORIES; i < KERNEL_DIRECTORY_START; i++) {
+        if (page_directory[i] & PAGE_PRESENT) {
+            pmm_free_page(page_directory[i] & PAGE_ADDR_MASK);
+            page_directory[i] = 0;
+        }
+    }
+
+    pmm_free_page(page_directory_phys);
 }
 
 static int alloc_and_map_user_page(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t flags, uint32_t* phys_out) {
@@ -420,8 +460,23 @@ int vmm_is_paging_enabled(void) {
     return paging_enabled;
 }
 
+int vmm_switch_page_directory(uint32_t page_directory_phys) {
+    if (!vmm_ready || page_directory_phys == 0) {
+        return 0;
+    }
+
+    load_cr3(page_directory_phys);
+    current_page_directory_phys = page_directory_phys;
+    current_page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
+    return 1;
+}
+
 uint32_t vmm_get_page_directory(void) {
     return current_page_directory_phys;
+}
+
+uint32_t vmm_get_kernel_page_directory(void) {
+    return kernel_page_directory_phys;
 }
 
 uint32_t vmm_get_identity_mapped_bytes(void) {

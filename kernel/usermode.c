@@ -1,10 +1,9 @@
 #include "usermode.h"
 
+#include "../console/console.h"
 #include "../mm/vmm.h"
-
-#define USERMODE_DEMO_SYSCALL_MAGIC 0x2BADCAFEU
-
-extern uint32_t usermode_enter(uint32_t entry, uint32_t user_esp);
+#include "../shell/shell.h"
+#include "process.h"
 
 static int ring3_demo_ready = 0;
 static VmmUserSpaceInfo ring3_demo_space;
@@ -39,16 +38,35 @@ uint32_t usermode_run_demo(void) {
 }
 
 void usermode_handle_syscall(InterruptFrame* frame) {
-    uint32_t value = 0xBAD08080U;
-
-    if (frame != (InterruptFrame*)0) {
-        value = frame->eax;
+    if (frame == (InterruptFrame*)0) {
+        usermode_return_to_kernel(0xBAD08080U);
     }
 
-    /*
-     * 演示阶段：只要用户态能执行 int 0x80 进入这里，就直接返回 shell。
-     * 不在中断栈上打印，避免把“系统调用是否成功”和“控制台输出是否安全”
-     * 混在一起。
-     */
-    usermode_return_to_kernel(value);
+    if (frame->eax == SYS_WRITE) {
+        const char* text = (const char*)frame->ebx;
+        uint32_t length = frame->ecx;
+
+        if (length > 512U) {
+            length = 512U;
+        }
+
+        shell_note_async_output();
+        for (uint32_t i = 0; i < length; i++) {
+            console_put_char(text[i]);
+        }
+
+        frame->eax = length;
+        return;
+    }
+
+    if (frame->eax == SYS_EXIT) {
+        usermode_return_to_kernel(frame->ebx);
+    }
+
+    if (frame->eax == SYS_YIELD) {
+        process_save_yield_frame(frame);
+        usermode_return_to_kernel(USERMODE_RETURN_YIELD);
+    }
+
+    usermode_return_to_kernel(frame->eax);
 }

@@ -15,6 +15,7 @@ usermode_saved_edi:
 .section .text
 .code32
 .global usermode_enter
+.global usermode_enter_context
 .global usermode_return_to_kernel
 
 usermode_enter:
@@ -43,6 +44,41 @@ usermode_enter:
 
     pushl $0x1B
     pushl %eax
+    iret
+
+usermode_enter_context:
+    movl %esp, usermode_saved_esp
+    movl %ebp, usermode_saved_ebp
+    movl %ebx, usermode_saved_ebx
+    movl %esi, usermode_saved_esi
+    movl %edi, usermode_saved_edi
+
+    movl 4(%esp), %esi
+
+    movl 0(%esi), %eax
+    movl 4(%esi), %edx
+    movl 8(%esi), %ecx
+    orl $0x200, %ecx
+
+    pushl $0x23
+    pushl %edx
+    pushl %ecx
+    pushl $0x1B
+    pushl %eax
+
+    movw $0x23, %cx
+    movw %cx, %ds
+    movw %cx, %es
+    movw %cx, %fs
+    movw %cx, %gs
+
+    movl 36(%esi), %ebp
+    movl 16(%esi), %ebx
+    movl 20(%esi), %ecx
+    movl 24(%esi), %edx
+    movl 32(%esi), %edi
+    movl 12(%esi), %eax
+    movl 28(%esi), %esi
     iret
 
 usermode_return_to_kernel:

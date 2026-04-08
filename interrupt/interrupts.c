@@ -1,6 +1,7 @@
 #include "interrupts.h"
 #include "../console/console.h"
 #include "../drivers/io.h"
+#include "../kernel/process.h"
 #include "../kernel/usermode.h"
 #include "../mm/pager.h"
 
@@ -477,5 +478,9 @@ void isr_dispatch(InterruptFrame* frame) {
         }
 
         pic_send_eoi(irq);
+
+        if (irq == 0) {
+            process_preempt_if_needed(frame);
+        }
     }
 }

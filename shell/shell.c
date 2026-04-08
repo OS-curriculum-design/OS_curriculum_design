@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../drivers/ata.h"
 #include "../include/string.h"
+#include "../kernel/process.h"
 #include "../kernel/usermode.h"
 #include "../mm/pager.h"
 #include "../mm/pmm.h"
@@ -22,6 +23,9 @@ static char input_buffer[INPUT_MAX];
 // 记录当前输入缓冲区中已经存放了多少个字符。
 // 它始终指向下一次写入的位置。
 static int input_len = 0;
+static int prompt_visible = 0;
+static int async_output_active = 0;
+static int async_output_dirty = 0;
 
 static int demo_user_space_ready = 0;
 static VmmUserSpaceInfo demo_user_space;
@@ -257,6 +261,62 @@ static void run_command(const char* cmd) {
         return;
     }
 
+    // ps：显示当前进程表。
+    if (strcmp(cmd, "ps") == 0) {
+        process_print_table();
+        return;
+    }
+
+    // run hello：创建并运行一个内置用户进程。
+    if (strncmp(cmd, "run ", 4) == 0) {
+        if (!process_run_builtin(cmd + 4)) {
+            console_write_line("Usage: run hello|counter|busy");
+        }
+        return;
+    }
+
+    // spawn hello：只创建进程，放入 READY 队列，等待 sched 调度。
+    if (strncmp(cmd, "spawn ", 6) == 0) {
+        if (!process_spawn_builtin(cmd + 6)) {
+            console_write_line("Usage: spawn hello|counter|busy");
+        }
+        return;
+    }
+
+    // sched：运行下一个 READY 进程。
+    if (strcmp(cmd, "sched") == 0) {
+        process_schedule();
+        return;
+    }
+
+    // autosched：查看/控制时钟驱动的自动进程调度。
+    if (strcmp(cmd, "autosched") == 0) {
+        console_write("auto scheduling: ");
+        console_write_line(process_auto_schedule_enabled() ? "on" : "off");
+        return;
+    }
+
+    if (strcmp(cmd, "autosched on") == 0) {
+        process_set_auto_schedule(1);
+        console_write_line("auto scheduling: on");
+        return;
+    }
+
+    if (strcmp(cmd, "autosched off") == 0) {
+        process_set_auto_schedule(0);
+        console_write_line("auto scheduling: off");
+        return;
+    }
+
+    // reap：回收已经退出的 ZOMBIE 进程，释放它们的页。
+    if (strcmp(cmd, "reap") == 0) {
+        int count = process_reap_zombies();
+        console_write("reaped zombies: ");
+        console_write_dec(count);
+        console_put_char('\n');
+        return;
+    }
+
     // uservm：创建并显示一个用户虚拟地址空间示例。
     // 这里只做页表布局验证，还不会真正切换到用户态执行。
     if (strcmp(cmd, "uservm") == 0) {
@@ -333,12 +393,42 @@ static void run_command(const char* cmd) {
 // 一般在系统启动时由内核调用一次。
 void shell_init(void) {
     input_len = 0;
+    prompt_visible = 0;
+    async_output_active = 0;
+    async_output_dirty = 0;
     memset(input_buffer, 0, INPUT_MAX);
 }
 
 // 在控制台上显示命令提示符。
 void shell_prompt(void) {
     console_write("MyOS> ");
+    prompt_visible = 1;
+}
+
+void shell_begin_async_output(void) {
+    async_output_active = 1;
+    async_output_dirty = 0;
+}
+
+void shell_note_async_output(void) {
+    if (async_output_active && !async_output_dirty && prompt_visible) {
+        console_put_char('\n');
+        prompt_visible = 0;
+    }
+
+    async_output_dirty = 1;
+}
+
+void shell_end_async_output(void) {
+    if (async_output_active && async_output_dirty && !prompt_visible) {
+        shell_prompt();
+        for (int i = 0; i < input_len; i++) {
+            console_put_char(input_buffer[i]);
+        }
+    }
+
+    async_output_active = 0;
+    async_output_dirty = 0;
 }
 
 // 处理从键盘传入的单个字符。
@@ -352,6 +442,7 @@ void shell_handle_char(char c) {
     if (c == '\n') {
         // 先在屏幕上换行，让执行结果显示在下一行。
         console_put_char('\n');
+        prompt_visible = 0;
 
         // 把当前输入补成合法的 C 字符串后执行命令。
         input_buffer[input_len] = '\0';

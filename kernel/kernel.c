@@ -6,6 +6,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "gdt.h"
+#include "process.h"
 #include "../shell/shell.h"
 #include "../timer/timer.h"
 
@@ -27,6 +28,7 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     interrupts_init();
     ata_init();
     pager_init();
+    process_init();
     keyboard_init();
     timer_init(100);
     shell_init();
@@ -42,7 +44,11 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
         }
 
         while (timer_take_schedule_event()) {
-            /* Scheduler hook for future RR task switching. */
+            if (process_auto_schedule_enabled() && process_has_ready()) {
+                shell_begin_async_output();
+                process_schedule_auto();
+                shell_end_async_output();
+            }
         }
 
         interrupts_disable();

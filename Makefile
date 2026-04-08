@@ -7,6 +7,7 @@ LDFLAGS = -m elf_i386 -T linker.ld
 C_SOURCES = \
 	kernel/gdt.c \
 	kernel/kernel.c \
+	kernel/process.c \
 	kernel/usermode.c \
 	mm/pmm.c \
 	mm/pager.c \

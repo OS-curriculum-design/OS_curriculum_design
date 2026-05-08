@@ -13,6 +13,7 @@
 
 #include "../console/console.h"
 #include "../include/string.h"
+#include "../mm/pager.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../timer/timer.h"
@@ -32,8 +33,6 @@ typedef struct {
     const char* name;
     UserContext context;
     uint32_t page_directory_phys;
-    uint32_t code_phys;
-    uint32_t stack_phys;
     uint32_t exit_code;
     uint32_t image_size;
 } Process;
@@ -87,8 +86,6 @@ static Process* allocate_process(void) {
             processes[i].context.user_esp = PROCESS_USER_STACK_TOP;
             processes[i].context.eflags = 0x202U;
             processes[i].page_directory_phys = 0;
-            processes[i].code_phys = 0;
-            processes[i].stack_phys = 0;
             processes[i].exit_code = 0;
             processes[i].image_size = 0;
             return &processes[i];
@@ -100,7 +97,6 @@ static Process* allocate_process(void) {
 
 int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
     Process* process;
-    uint8_t* code_dst;
 
     if (image == (const uint8_t*)0 || image_size == 0 || image_size > PROCESS_IMAGE_MAX) {
         return 0;
@@ -119,54 +115,28 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
         return 0;
     }
 
-    /* 代码页和栈页都独立分配，便于后续分别映射和回收。 */
-    process->code_phys = pmm_alloc_page();
-    if (process->code_phys == 0) {
-        pmm_free_page(process->page_directory_phys);
-        process->used = 0;
-        process->state = PROCESS_UNUSED;
-        return 0;
-    }
-
-    process->stack_phys = pmm_alloc_page();
-    if (process->stack_phys == 0) {
-        pmm_free_page(process->code_phys);
-        pmm_free_page(process->page_directory_phys);
-        process->used = 0;
-        process->state = PROCESS_UNUSED;
-        return 0;
-    }
-
-    /* 先在内核地址空间里把代码页和栈页清零，再把镜像拷进去。 */
-    code_dst = (uint8_t*)vmm_phys_to_virt(process->code_phys);
-    memset(code_dst, 0, PAGE_SIZE);
-    memset(vmm_phys_to_virt(process->stack_phys), 0, PAGE_SIZE);
-
-    for (uint32_t i = 0; i < image_size; i++) {
-        code_dst[i] = image[i];
-    }
-
-    /* 进程代码固定映射到统一的用户代码基址。 */
-    if (!vmm_map_page_in_directory(process->page_directory_phys,
-                                   PROCESS_USER_CODE_BASE,
-                                   process->code_phys,
-                                   VMM_PAGE_USER)) {
-        pmm_free_page(process->stack_phys);
-        pmm_free_page(process->code_phys);
+    /*
+     * 进程代码页只写入交换区并登记为 not-present；
+     * 第一次从 PROCESS_USER_CODE_BASE 取指时，#PF 会把它换入物理内存。
+     */
+    if (!pager_register_page_data(process->page_directory_phys,
+                                  PROCESS_USER_CODE_BASE,
+                                  VMM_PAGE_USER,
+                                  image,
+                                  image_size)) {
         vmm_destroy_address_space(process->page_directory_phys);
         process->used = 0;
         process->state = PROCESS_UNUSED;
         return 0;
     }
 
-    /* 用户栈页放在栈顶下方一页，栈向低地址增长。 */
-    if (!vmm_map_page_in_directory(process->page_directory_phys,
-                                   PROCESS_USER_STACK_PAGE,
-                                   process->stack_phys,
-                                   VMM_PAGE_WRITABLE | VMM_PAGE_USER)) {
-        vmm_unmap_page_in_directory(process->page_directory_phys, PROCESS_USER_CODE_BASE);
-        pmm_free_page(process->stack_phys);
-        pmm_free_page(process->code_phys);
+    /*
+     * 栈页同样延迟分配。iret 只加载 ESP，真正读写栈时才会触发 #PF。
+     */
+    if (!pager_register_page_in_directory(process->page_directory_phys,
+                                          PROCESS_USER_STACK_PAGE,
+                                          VMM_PAGE_WRITABLE | VMM_PAGE_USER)) {
+        pager_unregister_page(process->page_directory_phys, PROCESS_USER_CODE_BASE);
         vmm_destroy_address_space(process->page_directory_phys);
         process->used = 0;
         process->state = PROCESS_UNUSED;
@@ -408,18 +378,10 @@ static void release_process(Process* process) {
         return;
     }
 
-    /* 按“先取消映射，再释放物理页，最后销毁页目录”的顺序回收资源。 */
-    if (process->code_phys != 0) {
-        vmm_unmap_page_in_directory(process->page_directory_phys, PROCESS_USER_CODE_BASE);
-        pmm_free_page(process->code_phys);
-    }
-
-    if (process->stack_phys != 0) {
-        vmm_unmap_page_in_directory(process->page_directory_phys, PROCESS_USER_STACK_PAGE);
-        pmm_free_page(process->stack_phys);
-    }
-
     if (process->page_directory_phys != 0) {
+        /* Pager 会处理“已换入”和“仍在交换区”的两种页状态。 */
+        pager_unregister_page(process->page_directory_phys, PROCESS_USER_CODE_BASE);
+        pager_unregister_page(process->page_directory_phys, PROCESS_USER_STACK_PAGE);
         vmm_destroy_address_space(process->page_directory_phys);
     }
 
@@ -429,8 +391,6 @@ static void release_process(Process* process) {
     process->name = "";
     memset(&process->context, 0, sizeof(UserContext));
     process->page_directory_phys = 0;
-    process->code_phys = 0;
-    process->stack_phys = 0;
     process->exit_code = 0;
     process->image_size = 0;
 }

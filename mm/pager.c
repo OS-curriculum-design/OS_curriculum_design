@@ -22,6 +22,7 @@ typedef struct {
     int used;
     int present;
     int swapped;
+    uint32_t page_directory_phys;
     uint32_t virt_addr;
     uint32_t phys_addr;
     uint32_t flags;
@@ -61,11 +62,13 @@ static int swap_read_slot(uint32_t slot, void* buffer) {
     return ata_read_sectors(swap_lba_for_slot(slot), (uint8_t)PAGER_SECTORS_PER_PAGE, buffer);
 }
 
-static int find_page_by_virt(uint32_t virt_addr, uint32_t* page_index_out) {
+static int find_page_by_virt(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* page_index_out) {
     uint32_t page_addr = align_down_page(virt_addr);
 
     for (uint32_t i = 0; i < PAGER_MAX_PAGES; i++) {
-        if (pager_pages[i].used && pager_pages[i].virt_addr == page_addr) {
+        if (pager_pages[i].used &&
+            pager_pages[i].page_directory_phys == page_directory_phys &&
+            pager_pages[i].virt_addr == page_addr) {
             if (page_index_out != (uint32_t*)0) {
                 *page_index_out = i;
             }
@@ -91,7 +94,9 @@ static int page_was_accessed(uint32_t page_index) {
     uint32_t entry = 0;
 
     /* 通过页表项中的 accessed 位判断“最近是否被碰过”。 */
-    if (!vmm_get_page_entry(pager_pages[page_index].virt_addr, &entry)) {
+    if (!vmm_get_page_entry_in_directory(pager_pages[page_index].page_directory_phys,
+                                         pager_pages[page_index].virt_addr,
+                                         &entry)) {
         return 0;
     }
 
@@ -104,7 +109,8 @@ static uint32_t choose_victim_frame(void) {
 
         /* 给最近访问过的页一次“第二次机会”，清掉 accessed 后跳过它。 */
         if (page_was_accessed(page_index)) {
-            vmm_clear_page_accessed(pager_pages[page_index].virt_addr);
+            vmm_clear_page_accessed_in_directory(pager_pages[page_index].page_directory_phys,
+                                                 pager_pages[page_index].virt_addr);
             clock_hand = (clock_hand + 1U) % PAGER_FRAME_LIMIT;
             continue;
         }
@@ -123,7 +129,7 @@ static int evict_frame(uint32_t frame_slot) {
         return 0;
     }
 
-    vmm_unmap_page(victim->virt_addr);
+    vmm_unmap_page_in_directory(victim->page_directory_phys, victim->virt_addr);
     pmm_free_page(victim->phys_addr);
 
     victim->phys_addr = 0;
@@ -165,7 +171,7 @@ static int page_in(uint32_t page_index) {
         return 0;
     }
 
-    if (!vmm_map_page(page->virt_addr, phys_addr, page->flags)) {
+    if (!vmm_map_page_in_directory(page->page_directory_phys, page->virt_addr, phys_addr, page->flags)) {
         pmm_free_page(phys_addr);
         console_write_line("pager: vmm_map_page failed");
         return 0;
@@ -192,6 +198,7 @@ int pager_init(void) {
         pager_pages[i].used = 0;
         pager_pages[i].present = 0;
         pager_pages[i].swapped = 0;
+        pager_pages[i].page_directory_phys = 0;
         pager_pages[i].virt_addr = 0;
         pager_pages[i].phys_addr = 0;
         pager_pages[i].flags = 0;
@@ -218,17 +225,35 @@ int pager_is_ready(void) {
     return pager_ready;
 }
 
-int pager_register_page(uint32_t virt_addr, uint32_t flags) {
+int pager_register_page_data(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t flags, const uint8_t* data, uint32_t data_size) {
     uint32_t page_index;
     uint32_t page_addr;
+    uint8_t page_buffer[PAGE_SIZE];
 
-    if (!pager_ready || (virt_addr % PAGE_SIZE) != 0) {
+    if (!pager_ready ||
+        page_directory_phys == 0 ||
+        (virt_addr % PAGE_SIZE) != 0 ||
+        data_size > PAGE_SIZE ||
+        (data == (const uint8_t*)0 && data_size != 0)) {
         return 0;
     }
 
     /* 重复注册同一页时，仅更新权限标志。 */
-    if (find_page_by_virt(virt_addr, &page_index)) {
+    if (find_page_by_virt(page_directory_phys, virt_addr, &page_index)) {
         pager_pages[page_index].flags = flags;
+        if (data != (const uint8_t*)0 || data_size == 0) {
+            for (uint32_t i = 0; i < PAGE_SIZE; i++) {
+                page_buffer[i] = 0;
+            }
+            if (data != (const uint8_t*)0) {
+                for (uint32_t i = 0; i < data_size; i++) {
+                    page_buffer[i] = data[i];
+                }
+            }
+            if (!swap_write_slot(pager_pages[page_index].swap_slot, page_buffer)) {
+                return 0;
+            }
+        }
         return 1;
     }
 
@@ -238,13 +263,23 @@ int pager_register_page(uint32_t virt_addr, uint32_t flags) {
 
     page_addr = align_down_page(virt_addr);
     /* 把“该页还未被真正写过”的初始内容视作一页全 0 数据。 */
-    if (!swap_write_slot(pager_pages[page_index].swap_slot, zero_page)) {
+    for (uint32_t i = 0; i < PAGE_SIZE; i++) {
+        page_buffer[i] = 0;
+    }
+    if (data != (const uint8_t*)0) {
+        for (uint32_t i = 0; i < data_size; i++) {
+            page_buffer[i] = data[i];
+        }
+    }
+
+    if (!swap_write_slot(pager_pages[page_index].swap_slot, page_buffer)) {
         return 0;
     }
 
     pager_pages[page_index].used = 1;
     pager_pages[page_index].present = 0;
     pager_pages[page_index].swapped = 1;
+    pager_pages[page_index].page_directory_phys = page_directory_phys;
     pager_pages[page_index].virt_addr = page_addr;
     pager_pages[page_index].phys_addr = 0;
     pager_pages[page_index].flags = flags;
@@ -253,15 +288,67 @@ int pager_register_page(uint32_t virt_addr, uint32_t flags) {
     return 1;
 }
 
+int pager_register_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t flags) {
+    return pager_register_page_data(page_directory_phys, virt_addr, flags, zero_page, 0);
+}
+
+int pager_register_page(uint32_t virt_addr, uint32_t flags) {
+    return pager_register_page_in_directory(vmm_get_page_directory(), virt_addr, flags);
+}
+
+void pager_unregister_page(uint32_t page_directory_phys, uint32_t virt_addr) {
+    uint32_t page_index;
+
+    if (!pager_ready || page_directory_phys == 0) {
+        return;
+    }
+
+    if (!find_page_by_virt(page_directory_phys, virt_addr, &page_index)) {
+        return;
+    }
+
+    if (pager_pages[page_index].present) {
+        for (uint32_t slot = 0; slot < resident_frames; slot++) {
+            if (frame_pages[slot] == page_index) {
+                if (resident_frames > 0 && slot + 1U < resident_frames) {
+                    frame_pages[slot] = frame_pages[resident_frames - 1U];
+                }
+                resident_frames--;
+                if (resident_frames == 0 || clock_hand >= resident_frames) {
+                    clock_hand = 0;
+                }
+                break;
+            }
+        }
+
+        vmm_unmap_page_in_directory(page_directory_phys, pager_pages[page_index].virt_addr);
+        pmm_free_page(pager_pages[page_index].phys_addr);
+    }
+
+    pager_pages[page_index].used = 0;
+    pager_pages[page_index].present = 0;
+    pager_pages[page_index].swapped = 0;
+    pager_pages[page_index].page_directory_phys = 0;
+    pager_pages[page_index].virt_addr = 0;
+    pager_pages[page_index].phys_addr = 0;
+    pager_pages[page_index].flags = 0;
+
+    if (registered_pages > 0) {
+        registered_pages--;
+    }
+}
+
 int pager_handle_page_fault(uint32_t fault_addr, uint32_t err_code) {
     uint32_t page_index;
+    uint32_t page_directory_phys;
 
     /* 只处理 not-present 页故障；权限错误应交给上层当成真正异常处理。 */
     if (!pager_ready || (err_code & 0x01)) {
         return 0;
     }
 
-    if (!find_page_by_virt(fault_addr, &page_index)) {
+    page_directory_phys = vmm_get_page_directory();
+    if (!find_page_by_virt(page_directory_phys, fault_addr, &page_index)) {
         return 0;
     }
 

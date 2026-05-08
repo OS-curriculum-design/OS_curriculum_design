@@ -212,52 +212,66 @@ int vmm_get_mapping(uint32_t virt_addr, uint32_t* phys_addr_out) {
     return 1;
 }
 
-int vmm_get_page_entry(uint32_t virt_addr, uint32_t* entry_out) {
+int vmm_get_page_entry_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* entry_out) {
     uint32_t directory_index;
     uint32_t table_index;
+    uint32_t* page_directory;
     uint32_t* page_table;
 
-    if (current_page_directory == (uint32_t*)0 || entry_out == (uint32_t*)0) {
+    if (page_directory_phys == 0 || entry_out == (uint32_t*)0) {
         return 0;
     }
 
+    page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
     directory_index = page_directory_index(virt_addr);
     table_index = page_table_index(virt_addr);
 
-    if (!(current_page_directory[directory_index] & PAGE_PRESENT)) {
+    if (!(page_directory[directory_index] & PAGE_PRESENT)) {
         return 0;
     }
 
-    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(current_page_directory[directory_index]));
+    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(page_directory[directory_index]));
     *entry_out = page_table[table_index];
     return 1;
 }
 
-int vmm_clear_page_accessed(uint32_t virt_addr) {
+int vmm_get_page_entry(uint32_t virt_addr, uint32_t* entry_out) {
+    return vmm_get_page_entry_in_directory(current_page_directory_phys, virt_addr, entry_out);
+}
+
+int vmm_clear_page_accessed_in_directory(uint32_t page_directory_phys, uint32_t virt_addr) {
     uint32_t directory_index;
     uint32_t table_index;
+    uint32_t* page_directory;
     uint32_t* page_table;
 
-    if (current_page_directory == (uint32_t*)0) {
+    if (page_directory_phys == 0) {
         return 0;
     }
 
+    page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
     directory_index = page_directory_index(virt_addr);
     table_index = page_table_index(virt_addr);
 
-    if (!(current_page_directory[directory_index] & PAGE_PRESENT)) {
+    if (!(page_directory[directory_index] & PAGE_PRESENT)) {
         return 0;
     }
 
-    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(current_page_directory[directory_index]));
+    page_table = (uint32_t*)phys_to_virt((uint32_t)page_table_from_directory(page_directory[directory_index]));
     if (!(page_table[table_index] & PAGE_PRESENT)) {
         return 0;
     }
 
     /* accessed 位由 CPU 自动置位，这里清掉供时钟算法判断“最近是否被访问过”。 */
     page_table[table_index] &= ~VMM_PAGE_ACCESSED;
-    invalidate_page(virt_addr);
+    if (page_directory_phys == current_page_directory_phys) {
+        invalidate_page(virt_addr);
+    }
     return 1;
+}
+
+int vmm_clear_page_accessed(uint32_t virt_addr) {
+    return vmm_clear_page_accessed_in_directory(current_page_directory_phys, virt_addr);
 }
 
 int vmm_get_mapping_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* phys_addr_out) {

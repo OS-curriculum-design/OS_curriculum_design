@@ -47,8 +47,12 @@ int vmm_get_mapping(uint32_t virt_addr, uint32_t* phys_addr_out);
 int vmm_get_mapping_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* phys_addr_out);
 /* 读取当前页目录下某个虚拟页对应的页表项原始值。 */
 int vmm_get_page_entry(uint32_t virt_addr, uint32_t* entry_out);
+/* 读取指定页目录下某个虚拟页对应的页表项原始值。 */
+int vmm_get_page_entry_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* entry_out);
 /* 清除某个虚拟页的 accessed 位，供时钟算法使用。 */
 int vmm_clear_page_accessed(uint32_t virt_addr);
+/* 清除指定页目录中某个虚拟页的 accessed 位。 */
+int vmm_clear_page_accessed_in_directory(uint32_t page_directory_phys, uint32_t virt_addr);
 
 /* 创建仅复制内核高地址映射的新页目录。 */
 int vmm_create_address_space(uint32_t* page_directory_phys_out);

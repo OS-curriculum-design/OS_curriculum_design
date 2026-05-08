@@ -3,6 +3,12 @@
 
 #include "../include/types.h"
 
+/*
+ * Multiboot 结构定义
+ * ==================
+ * 这里只保留 PMM 初始化阶段真正需要解析的那部分字段。
+ */
+
 /* GRUB 传入 eax 时用于校验 multiboot 协议的魔数。 */
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 

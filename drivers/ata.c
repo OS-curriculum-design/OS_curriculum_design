@@ -1,7 +1,14 @@
+/*
+ * ATA PIO 驱动实现
+ * =================
+ * 这个模块通过 IDE 主通道的标准端口与磁盘交互，采用最基础的 PIO 模式。
+ * 对本项目来说，它主要服务于 SimpleFS 和分页换出交换区。
+ */
 #include "ata.h"
 
 #include "io.h"
 
+/* IDE 主通道寄存器端口定义。 */
 #define ATA_DATA       0x1F0
 #define ATA_ERROR      0x1F1
 #define ATA_SECCOUNT   0x1F2
@@ -23,9 +30,11 @@
 #define ATA_STATUS_RDY  0x40
 #define ATA_STATUS_BSY  0x80
 
+/* 只有初始化成功后，读写接口才会真正工作。 */
 static int ata_ready = 0;
 
 static void ata_io_wait(void) {
+    /* 读取备用状态寄存器四次是 ATA 驱动里常见的短延时写法。 */
     inb(ATA_ALT_STATUS);
     inb(ATA_ALT_STATUS);
     inb(ATA_ALT_STATUS);
@@ -33,6 +42,7 @@ static void ata_io_wait(void) {
 }
 
 static int ata_wait_not_busy(void) {
+    /* 在发送新命令前，必须先确认设备不再处于忙状态。 */
     for (uint32_t i = 0; i < 100000U; i++) {
         uint8_t status = inb(ATA_STATUS);
         if (!(status & ATA_STATUS_BSY)) {
@@ -44,6 +54,7 @@ static int ata_wait_not_busy(void) {
 }
 
 static int ata_wait_drq(void) {
+    /* DRQ=1 表示当前扇区的数据缓冲区已经准备好。 */
     for (uint32_t i = 0; i < 100000U; i++) {
         uint8_t status = inb(ATA_STATUS);
 
@@ -61,6 +72,7 @@ static int ata_wait_drq(void) {
 }
 
 static void ata_select_lba28(uint32_t lba, uint8_t sector_count) {
+    /* 0xE0 选择主盘并启用 LBA；LBA 高 4 位拼进 DRIVE 寄存器。 */
     outb(ATA_DRIVE, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
     ata_io_wait();
     outb(ATA_SECCOUNT, sector_count);
@@ -70,6 +82,7 @@ static void ata_select_lba28(uint32_t lba, uint8_t sector_count) {
 }
 
 int ata_init(void) {
+    /* 简单探测：设备不忙且 RDY 置位，即视为可用。 */
     outb(ATA_DRIVE, 0xE0);
     ata_io_wait();
 
@@ -100,6 +113,7 @@ int ata_read_sectors(uint32_t lba, uint8_t sector_count, void* buffer) {
             return 0;
         }
 
+        /* 一个扇区 512 字节，PIO 模式下按 16 位字读出。 */
         for (uint32_t word = 0; word < ATA_SECTOR_SIZE / 2U; word++) {
             *out++ = inw(ATA_DATA);
         }
@@ -127,12 +141,14 @@ int ata_write_sectors(uint32_t lba, uint8_t sector_count, const void* buffer) {
             return 0;
         }
 
+        /* 写入时同样按 16 位字推送到数据端口。 */
         for (uint32_t word = 0; word < ATA_SECTOR_SIZE / 2U; word++) {
             outw(ATA_DATA, *in++);
         }
         ata_io_wait();
     }
 
+    /* CACHE FLUSH 尽量确保控制器把缓存中的写入真正刷回磁盘。 */
     if (!ata_wait_not_busy()) {
         return 0;
     }

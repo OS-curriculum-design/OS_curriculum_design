@@ -1,3 +1,10 @@
+# 中断汇编入口说明
+# =================
+# 这个文件为每个异常/IRQ 提供一个统一的汇编入口，职责是：
+# 1. 补齐错误码和中断向量号
+# 2. 保存通用寄存器与段寄存器
+# 3. 切到内核数据段
+# 4. 把整理好的 InterruptFrame 交给 isr_dispatch
 .extern isr_dispatch
 
 .section .text
@@ -6,6 +13,7 @@
 .macro ISR_NOERR num
 .global isr\num
 isr\num:
+    # 对“CPU 不会自动压错误码”的异常，手动补 0，保证栈帧统一。
     pushl $0
     pushl $\num
     jmp isr_common_stub
@@ -14,6 +22,7 @@ isr\num:
 .macro ISR_ERR num
 .global isr\num
 isr\num:
+    # 对“CPU 已自动压错误码”的异常，只需要再压入向量号。
     pushl $\num
     jmp isr_common_stub
 .endm
@@ -21,6 +30,7 @@ isr\num:
 .macro IRQ num vector
 .global irq\num
 irq\num:
+    # 硬件 IRQ 没有错误码，同样补 0。
     pushl $0
     pushl $\vector
     jmp isr_common_stub
@@ -79,22 +89,26 @@ IRQ 15, 47
 ISR_NOERR 128
 
 isr_common_stub:
+    # pusha 会依次保存 eax, ecx, edx, ebx, esp, ebp, esi, edi。
     pusha
     pushl %ds
     pushl %es
     pushl %fs
     pushl %gs
 
+    # 所有后续 C 代码都按内核数据段访问内存。
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %fs
     movw %ax, %gs
 
+    # 传入当前栈顶，等价于 InterruptFrame*。
     pushl %esp
     call isr_dispatch
     addl $4, %esp
 
+    # 按与压栈相反的顺序恢复寄存器，再由 iret 恢复 CPU 自动保存的现场。
     popl %gs
     popl %fs
     popl %es

@@ -1,3 +1,15 @@
+#
+# 项目构建脚本说明
+# =================
+# 这个 Makefile 负责把 32 位内核的 C / 汇编源码编译成 ELF，
+# 再打包成可由 GRUB 启动的 ISO 镜像，并提供 QEMU 运行入口。
+#
+# 主要目标：
+# - all      : 完整构建并生成 myos.iso
+# - check    : 用 grub-file 检查内核是否带有 multiboot 头
+# - run      : 创建磁盘镜像并在 QEMU 中启动
+# - clean    : 删除中间文件和产物
+#
 CC      = gcc
 LD      = ld
 
@@ -25,6 +37,7 @@ C_OBJECTS = $(C_SOURCES:.c=.o)
 
 all: check myos.iso
 
+# 启动汇编、GDT/TSS 刷新、用户态切换和中断桩都单独编译成目标文件。
 boot/boot.o: boot/boot.s
 	$(CC) -m32 -c $< -o $@
 
@@ -67,18 +80,22 @@ mm/%.o: mm/%.c
 myos.bin: boot/boot.o kernel/gdt_flush.o kernel/usermode_switch.o interrupt/interrupt_stubs.o $(C_OBJECTS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ boot/boot.o kernel/gdt_flush.o kernel/usermode_switch.o interrupt/interrupt_stubs.o $(C_OBJECTS)
 
+# GRUB 的 multiboot 检查能尽早发现启动头缺失等问题。
 check: myos.bin
 	grub-file --is-x86-multiboot myos.bin
 
 iso/boot/myos.bin: myos.bin
 	cp myos.bin iso/boot/myos.bin
 
+# 使用 grub-mkrescue 生成可直接挂载到虚拟机的启动 ISO。
 myos.iso: iso/boot/myos.bin iso/boot/grub/grub.cfg
 	grub-mkrescue -o myos.iso iso
 
+# 额外准备一块 16MiB 的原始磁盘镜像，供 ATA / SimpleFS 使用。
 disk.img:
 	dd if=/dev/zero of=disk.img bs=1M count=16
 
+# 运行时同时挂载光盘镜像和 IDE 磁盘镜像，便于演示文件系统与分页换出。
 run: all disk.img
 	qemu-system-i386 -m 128M -boot d -cdrom myos.iso -drive file=disk.img,format=raw,if=ide,index=0,media=disk
 

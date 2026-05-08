@@ -1,3 +1,9 @@
+/*
+ * PS/2 键盘驱动
+ * ==============
+ * 键盘 IRQ1 到来时，处理函数从 0x60 端口读取扫描码并翻译成 ASCII，
+ * 然后塞进环形缓冲区，供 Shell 在主循环里异步读取。
+ */
 #include "keyboard.h"
 #include "io.h"
 #include "../interrupt/interrupts.h"
@@ -5,6 +11,7 @@
 /* 这是一个很小的环形缓冲区，用来暂存中断里收到的字符。 */
 #define KEYBOARD_BUFFER_SIZE 128
 
+/* 当前仅跟踪 Shift 键状态，不处理 Caps Lock / Ctrl / Alt 等组合键。 */
 static int shift_pressed = 0;
 static volatile char key_buffer[KEYBOARD_BUFFER_SIZE];
 static volatile uint8_t key_head = 0;
@@ -70,6 +77,7 @@ static void keyboard_irq_handler(InterruptFrame* frame) {
     /* bit7=1 表示这是按键释放事件，我们这里只处理按下事件。 */
     if (scancode & 0x80) return;
 
+    /* 当前实现只处理最常见的一字节扫描码。 */
     char c = shift_pressed ? shift_map[scancode] : normal_map[scancode];
     if (!c) return;
 
@@ -81,7 +89,7 @@ void keyboard_init(void) {
     key_head = 0;
     key_tail = 0;
 
-    /* 键盘来自 IRQ1。 */
+    /* 键盘控制器挂在 IRQ1。 */
     irq_register_handler(1, keyboard_irq_handler);
 }
 

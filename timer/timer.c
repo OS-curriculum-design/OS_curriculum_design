@@ -1,3 +1,10 @@
+/*
+ * PIT 定时器实现
+ * ===============
+ * 本模块负责两件事：
+ * 1. 维护系统启动后的全局 tick 计数
+ * 2. 把“时间片耗尽”转化成调度事件，供进程模块消费
+ */
 #include "timer.h"
 #include "../drivers/io.h"
 #include "../interrupt/interrupts.h"
@@ -19,6 +26,7 @@ static volatile uint32_t timeslice_ticks = 10;
 static volatile uint32_t slice_remaining = 10;
 static volatile uint32_t schedule_event_pending = 0;
 
+/* 进入临界区：保存 EFLAGS，并清除 IF 以屏蔽可屏蔽中断。 */
 static uint32_t interrupt_save_and_disable(void) {
     uint32_t flags;
     __asm__ __volatile__(
@@ -31,6 +39,7 @@ static uint32_t interrupt_save_and_disable(void) {
     return flags;
 }
 
+/* 退出临界区：恢复之前保存的 EFLAGS。 */
 static void interrupt_restore(uint32_t flags) {
     __asm__ __volatile__(
         "pushl %0\n\t"
@@ -65,6 +74,7 @@ void timer_init(uint32_t frequency_hz) {
         frequency_hz = 100;
     }
 
+    /* PIT 真正接收的是分频值，不是目标频率本身。 */
     uint32_t divisor = PIT_BASE_FREQUENCY / frequency_hz;
     if (divisor == 0) {
         divisor = 1;
@@ -104,6 +114,7 @@ void timer_set_timeslice(uint32_t ticks) {
         ticks = 1;
     }
 
+    /* 与 IRQ0 处理函数共享状态，因此这里需要一个很小的临界区。 */
     uint32_t flags = interrupt_save_and_disable();
 
     timeslice_ticks = ticks;
@@ -135,5 +146,6 @@ int timer_take_schedule_event(void) {
 }
 
 int timer_has_schedule_event(void) {
+    /* 只读检查，不消费事件。 */
     return schedule_event_pending != 0;
 }

@@ -1,3 +1,11 @@
+/*
+ * 中断与异常分发实现
+ * ==================
+ * 本模块负责：
+ * - 建立 IDT
+ * - 重映射 PIC
+ * - 把异常、硬件中断、系统调用统一汇总到 isr_dispatch
+ */
 #include "interrupts.h"
 #include "../console/console.h"
 #include "../drivers/io.h"
@@ -13,14 +21,13 @@
  * - 32~47: 我们通常放 PIC 重映射后的 16 条硬件 IRQ
  * - 其余: 可以留给系统调用、自定义软件中断等
  */
-#define IDT_ENTRIES 256 // interrupt descriptor table
+#define IDT_ENTRIES 256
 
 /* 8259A PIC 的 I/O 端口。 */
-#define PIC1_COMMAND 0x20//主 PIC 命令寄存器  pic for programmable interrupt controller
-#define PIC1_DATA 0x21//主 PIC 数据寄存器
-#define PIC2_COMMAND 0xA0//从 PIC 命令寄存器
-#define PIC2_DATA 0xA1//从 PIC 数据寄存器
-//PIC是中断控制器，主PIC负责0-7,从PIC负责8-15
+#define PIC1_COMMAND 0x20
+#define PIC1_DATA 0x21
+#define PIC2_COMMAND 0xA0
+#define PIC2_DATA 0xA1
 /*
  * 向 PIC 命令端口写 0x20 表示 EOI（End Of Interrupt）：
  * “这次中断处理完了，你可以继续发下一次了”。
@@ -66,7 +73,7 @@ typedef struct {
     uint8_t zero;
     uint8_t type_attr;
     uint16_t offset_high;
-} __attribute__((packed)) IdtEntry;//禁止编译器对齐结构体
+} __attribute__((packed)) IdtEntry;
 
 typedef struct {
     /*
@@ -110,7 +117,7 @@ extern void isr28(void);
 extern void isr29(void);
 extern void isr30(void);
 extern void isr31(void);
-//对应CPU异常或特权异常（如除0/越界），一般汇编编写
+/* isr0~isr31 对应 CPU 异常入口。 */
 extern void irq0(void);
 extern void irq1(void);
 extern void irq2(void);
@@ -128,7 +135,6 @@ extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
 extern void isr128(void);
-//硬件中断请求（如键盘输入）
 static IdtEntry idt[IDT_ENTRIES];
 static IdtPointer idt_ptr;
 /* IRQ0~IRQ15 各自对应一条 C 处理函数。 */
@@ -181,17 +187,7 @@ static void idt_set_gate(uint8_t vector, uint32_t handler, uint16_t selector, ui
 }
 
 static void idt_load(void) {
-    /* 
-    lidt 把 idt_ptr 指向的描述符装进 CPU 的 IDTR 寄存器。
-    后注：asm表示汇编内联，volatile表示不要优化，
-    括号内是一条汇编指令：
-    lidt表示load idt，把idt加载进内存中。
-    %0代表这里填入的是输入中的第一个操作数，也就是后面的"m"(idt_ptr)。
-    asm的格式应当是asm(模板 : 输出 : 输入 : clobber)，
-    clobber代表什么可能被修改，比如说__asm__("mov $1, %eax");
-    如果没有clobber，编译器就不知道eax被修改了，所以一定要写成__asm__("mov $1, %%eax" : : : "eax");
-    这里我们的输入是"m"(idt_ptr)，m是一个页数，代表后面的东西是一个变量，要从内存中去读取
-    */
+    /* lidt 会把 idt_ptr 指向的伪描述符装入 IDTR。 */
     __asm__ __volatile__("lidt %0" : : "m"(idt_ptr)); 
 }
 
@@ -199,9 +195,7 @@ static uint16_t read_cs(void) {
     uint16_t cs;
     /*
      * 读取当前代码段选择子。
-     * 这里不能硬编码 0x08，因为当前引导环境（比如 GRUB 设置的 GDT）
-     * 不一定使用那组段号。之前就是这里写死导致中断一开就 #GP。
-     * 后注：将cs寄存器中的值传入第零个操作数，即后面的cs变量，=代表是一个输出，r代表需要一个寄存器来接受输出
+     * 这里不直接写死 0x08，是为了兼容“启动阶段的实际 GDT 布局”。
      */
     __asm__ __volatile__("mov %%cs, %0" : "=r"(cs));
     return cs;
@@ -209,10 +203,8 @@ static uint16_t read_cs(void) {
 
 static void pic_remap(void) {
     /* 先保存原屏蔽位，避免重映射时把原本的使能状态弄丢。 */
-    // 通过PICX_DATA这个端口去访问IMR(interrupt mask register)，读取中断屏蔽寄存器
     uint8_t mask1 = inb(PIC1_DATA);
     uint8_t mask2 = inb(PIC2_DATA);
-    //初始化的时候发四个ICW，第一个发到命令端口，后三个发到数据端口
     /*
      * 0x11 = ICW1:
      * - bit4=1: 表示开始初始化 PIC
@@ -276,11 +268,13 @@ static void pic_send_eoi(uint8_t irq) {
 
 static uint32_t read_cr2(void) {
     uint32_t cr2;
+    /* 页故障时，CR2 保存触发故障的线性地址。 */
     __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
     return cr2;
 }
 
 static void print_page_fault_error(uint32_t err_code) {
+    /* 把 #PF 错误码拆成人类可读的若干标志位。 */
     console_write("PF reason:");
     if (!(err_code & 0x01)) {
         console_write(" not-present");
@@ -306,7 +300,8 @@ static void print_page_fault_error(uint32_t err_code) {
     console_put_char('\n');
 }
 
-static void kernel_panic(InterruptFrame* frame) { // 发生无法处理的内核错误，打印错误信息并停机
+/* 对于当前内核无法恢复的异常，直接打印现场并停机。 */
+static void kernel_panic(InterruptFrame* frame) {
     console_set_color(0x0F, 0x04);
     console_write_line("");
     console_write_line("KERNEL PANIC");
@@ -418,6 +413,7 @@ void interrupts_init(void) {
         irq_handlers[irq] = 0;
     }
 
+    /* 最后准备 lidt 所需的伪描述符并真正装载 IDT。 */
     idt_ptr.limit = (uint16_t)(sizeof(idt) - 1);
     idt_ptr.base = (uint32_t)&idt;
 
@@ -445,17 +441,20 @@ void interrupts_disable(void) {
 }
 
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
+    /* 这里只登记处理函数本身，不改动 PIC 屏蔽位。 */
     if (irq < 16) {
         irq_handlers[irq] = handler;
     }
 }
 
 void isr_dispatch(InterruptFrame* frame) {
+    /* 0x80 约定为系统调用入口，优先于普通异常/IRQ 分发。 */
     if (frame->int_no == 0x80) {
         usermode_handle_syscall(frame);
         return;
     }
 
+    /* #PF 先尝试交给分页器按需补页；失败再走 panic。 */
     if (frame->int_no == 14) {
         if (pager_handle_page_fault(read_cr2(), frame->err_code)) {
             return;
@@ -464,7 +463,7 @@ void isr_dispatch(InterruptFrame* frame) {
 
     /* 小于 32 的向量号表示 CPU 异常。 */
     if (frame->int_no < IRQ_BASE) {
-        kernel_panic(frame);//控制台报错，系统停止
+        kernel_panic(frame);
         return;
     }
 
@@ -480,6 +479,7 @@ void isr_dispatch(InterruptFrame* frame) {
         pic_send_eoi(irq);
 
         if (irq == 0) {
+            /* 时钟中断结束前再判断是否需要抢占当前用户进程。 */
             process_preempt_if_needed(frame);
         }
     }

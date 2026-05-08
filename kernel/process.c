@@ -1,3 +1,14 @@
+/*
+ * 最小用户进程与调度器实现
+ * ========================
+ * 这份代码把“用户态程序”抽象成：
+ * - 一张私有页目录
+ * - 一页代码
+ * - 一页用户栈
+ * - 一份可恢复的用户寄存器上下文
+ *
+ * 调度策略采用简单轮转，并通过 SYS_YIELD / 时钟抢占切回内核。
+ */
 #include "process.h"
 
 #include "../console/console.h"
@@ -7,6 +18,7 @@
 #include "../timer/timer.h"
 #include "usermode.h"
 
+/* 当前系统最多同时容纳 8 个进程，便于教学和调试。 */
 #define PROCESS_MAX 8
 #define PROCESS_IMAGE_MAX PAGE_SIZE
 #define PROCESS_USER_CODE_BASE  0x00800000U
@@ -26,12 +38,16 @@ typedef struct {
     uint32_t image_size;
 } Process;
 
+/* 固定长度进程表，避免在内核里再引入动态链表管理复杂度。 */
 static Process processes[PROCESS_MAX];
 static int next_pid = 1;
+/* current_pid=0 表示当前不在执行任何用户进程。 */
 static int current_pid = 0;
+/* 轮转调度从上次选中位置的下一个槽位继续找。 */
 static int schedule_cursor = 0;
 static int auto_schedule_enabled = 1;
 
+/* 下面几组 emit_* 辅助函数用于动态拼装最小用户态机器码镜像。 */
 static void emit_u8(uint8_t* image, uint32_t* offset, uint8_t value) {
     image[*offset] = value;
     (*offset)++;
@@ -61,6 +77,7 @@ static Process* find_process_by_pid(int pid) {
 static Process* allocate_process(void) {
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (!processes[i].used) {
+            /* 把一项空槽初始化成 READY 状态的最小进程骨架。 */
             processes[i].used = 1;
             processes[i].pid = next_pid++;
             processes[i].state = PROCESS_READY;
@@ -102,6 +119,7 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
         return 0;
     }
 
+    /* 代码页和栈页都独立分配，便于后续分别映射和回收。 */
     process->code_phys = pmm_alloc_page();
     if (process->code_phys == 0) {
         pmm_free_page(process->page_directory_phys);
@@ -119,6 +137,7 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
         return 0;
     }
 
+    /* 先在内核地址空间里把代码页和栈页清零，再把镜像拷进去。 */
     code_dst = (uint8_t*)vmm_phys_to_virt(process->code_phys);
     memset(code_dst, 0, PAGE_SIZE);
     memset(vmm_phys_to_virt(process->stack_phys), 0, PAGE_SIZE);
@@ -127,6 +146,7 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
         code_dst[i] = image[i];
     }
 
+    /* 进程代码固定映射到统一的用户代码基址。 */
     if (!vmm_map_page_in_directory(process->page_directory_phys,
                                    PROCESS_USER_CODE_BASE,
                                    process->code_phys,
@@ -139,6 +159,7 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
         return 0;
     }
 
+    /* 用户栈页放在栈顶下方一页，栈向低地址增长。 */
     if (!vmm_map_page_in_directory(process->page_directory_phys,
                                    PROCESS_USER_STACK_PAGE,
                                    process->stack_phys,
@@ -163,6 +184,7 @@ static uint32_t build_hello_image(uint8_t* image) {
 
     memset(image, 0, PROCESS_IMAGE_MAX);
 
+    /* hello 程序只做一次 write，再 exit。 */
     emit_u8(image, &offset, 0xB8); /* mov eax, SYS_WRITE */
     emit_u32(image, &offset, SYS_WRITE);
     emit_u8(image, &offset, 0xBB); /* mov ebx, message */
@@ -186,6 +208,7 @@ static uint32_t build_hello_image(uint8_t* image) {
         image[offset++] = (uint8_t)message[i];
     }
 
+    /* 早期版本直接手动回填字符串地址，因此这里写死了 mov ebx, imm32 的位置。 */
     image[6] = (uint8_t)((PROCESS_USER_CODE_BASE + msg_offset) & 0xFF);
     image[7] = (uint8_t)(((PROCESS_USER_CODE_BASE + msg_offset) >> 8) & 0xFF);
     image[8] = (uint8_t)(((PROCESS_USER_CODE_BASE + msg_offset) >> 16) & 0xFF);
@@ -211,6 +234,10 @@ static uint32_t build_busy_image(uint8_t* image) {
 
     memset(image, 0, PROCESS_IMAGE_MAX);
 
+    /*
+     * busy 程序不会主动 yield，而是在用户态做忙等待，
+     * 适合观察抢占式时间片调度是否生效。
+     */
     emit_write_string(image, &offset, msg1, &patch1, &len1);
     emit_u8(image, &offset, 0xB9); /* mov ecx, imm32 */
     emit_u32(image, &offset, 0x02000000U);
@@ -252,6 +279,7 @@ static uint32_t build_busy_image(uint8_t* image) {
 static void patch_message_address(uint8_t* image, uint32_t instruction_offset, uint32_t msg_offset) {
     uint32_t address = PROCESS_USER_CODE_BASE + msg_offset;
 
+    /* 把 mov ebx, imm32 指令中的立即数回填成字符串在用户空间中的虚拟地址。 */
     image[instruction_offset + 1U] = (uint8_t)(address & 0xFF);
     image[instruction_offset + 2U] = (uint8_t)((address >> 8) & 0xFF);
     image[instruction_offset + 3U] = (uint8_t)((address >> 16) & 0xFF);
@@ -261,6 +289,7 @@ static void patch_message_address(uint8_t* image, uint32_t instruction_offset, u
 static void emit_write_string(uint8_t* image, uint32_t* offset, const char* message, uint32_t* patch_offset_out, uint32_t* msg_len_out) {
     uint32_t msg_len = (uint32_t)strlen(message);
 
+    /* 约定 write(ebx=text, ecx=len)。 */
     emit_u8(image, offset, 0xB8); /* mov eax, SYS_WRITE */
     emit_u32(image, offset, SYS_WRITE);
     *patch_offset_out = *offset;
@@ -275,6 +304,7 @@ static void emit_write_string(uint8_t* image, uint32_t* offset, const char* mess
 }
 
 static void emit_yield(uint8_t* image, uint32_t* offset) {
+    /* yield 通过 int 0x80 主动把控制权还给内核调度器。 */
     emit_u8(image, offset, 0xB8); /* mov eax, SYS_YIELD */
     emit_u32(image, offset, SYS_YIELD);
     emit_u8(image, offset, 0xCD); /* int 0x80 */
@@ -282,6 +312,7 @@ static void emit_yield(uint8_t* image, uint32_t* offset) {
 }
 
 static void emit_exit(uint8_t* image, uint32_t* offset, uint32_t exit_code) {
+    /* exit 返回后理论上不会继续执行，但这里仍补一个死循环做保险。 */
     emit_u8(image, offset, 0xB8); /* mov eax, SYS_EXIT */
     emit_u32(image, offset, SYS_EXIT);
     emit_u8(image, offset, 0xBB); /* mov ebx, exit_code */
@@ -309,6 +340,10 @@ static uint32_t build_counter_image(uint8_t* image) {
 
     memset(image, 0, PROCESS_IMAGE_MAX);
 
+    /*
+     * counter 在每一步输出之后主动 yield，
+     * 便于观察协作式切换与轮转调度顺序。
+     */
     emit_write_string(image, &offset, msg1, &patch1, &len1);
     emit_yield(image, &offset);
     emit_write_string(image, &offset, msg2, &patch2, &len2);
@@ -346,6 +381,7 @@ static int process_run(int pid) {
         return 0;
     }
 
+    /* 先切到目标进程页目录，再真正进入用户态。 */
     if (!vmm_switch_page_directory(process->page_directory_phys)) {
         return 0;
     }
@@ -355,6 +391,7 @@ static int process_run(int pid) {
     result = usermode_enter_context(&process->context);
     vmm_switch_page_directory(kernel_page_directory);
 
+    /* 用户态返回只可能有两种语义：yield，或者 exit(返回码)。 */
     if (result == USERMODE_RETURN_YIELD) {
         process->state = PROCESS_READY;
     } else {
@@ -371,6 +408,7 @@ static void release_process(Process* process) {
         return;
     }
 
+    /* 按“先取消映射，再释放物理页，最后销毁页目录”的顺序回收资源。 */
     if (process->code_phys != 0) {
         vmm_unmap_page_in_directory(process->page_directory_phys, PROCESS_USER_CODE_BASE);
         pmm_free_page(process->code_phys);
@@ -398,6 +436,7 @@ static void release_process(Process* process) {
 }
 
 void process_init(void) {
+    /* 开机时先把整张进程表置为空。 */
     for (int i = 0; i < PROCESS_MAX; i++) {
         processes[i].used = 0;
         processes[i].pid = 0;
@@ -415,6 +454,7 @@ int process_spawn_builtin(const char* name) {
     uint32_t image_size;
     int pid;
 
+    /* 先把内建程序翻译成一页机器码镜像，再走通用建进程流程。 */
     if (!process_build_builtin_image(name, image, sizeof(image), &image_size)) {
         return 0;
     }
@@ -452,6 +492,7 @@ int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image
 }
 
 int process_schedule(void) {
+    /* 手工调度入口，本质上只是包装了自动调度逻辑。 */
     if (process_schedule_auto()) {
         return 1;
     }
@@ -461,6 +502,7 @@ int process_schedule(void) {
 }
 
 int process_schedule_auto(void) {
+    /* 从 schedule_cursor 开始做一圈线性扫描，实现最简单的 round-robin。 */
     for (int offset = 0; offset < PROCESS_MAX; offset++) {
         int i = (schedule_cursor + offset) % PROCESS_MAX;
 
@@ -472,6 +514,7 @@ int process_schedule_auto(void) {
                 return 0;
             }
 
+            /* 下次从当前成功运行项的下一个槽位开始找。 */
             schedule_cursor = (i + 1) % PROCESS_MAX;
             Process* process = find_process_by_pid(pid);
             if (process != (Process*)0 && process->state == PROCESS_ZOMBIE) {
@@ -528,6 +571,7 @@ void process_save_yield_frame(InterruptFrame* frame) {
         return;
     }
 
+    /* 把会影响用户态继续执行的关键寄存器全部抄回进程上下文。 */
     process->context.eip = frame->eip;
     process->context.user_esp = frame->useresp;
     process->context.eflags = frame->eflags;
@@ -541,10 +585,16 @@ void process_save_yield_frame(InterruptFrame* frame) {
 }
 
 int process_preempt_if_needed(InterruptFrame* frame) {
+    /*
+     * 只有在“当前确实正在执行用户态进程”时才允许抢占：
+     * - current_pid != 0
+     * - CS 的 RPL 为 3，说明中断发生在用户态
+     */
     if (frame == (InterruptFrame*)0 || current_pid == 0 || (frame->cs & 0x3U) != 0x3U) {
         return 0;
     }
 
+    /* 取走一个时间片事件，避免主循环里再次重复消费。 */
     if (!timer_take_schedule_event()) {
         return 0;
     }
@@ -579,6 +629,7 @@ void process_set_auto_schedule(int enabled) {
 int process_reap_zombies(void) {
     int reaped = 0;
 
+    /* 把所有已经 exit 的进程统一回收掉。 */
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (processes[i].used && processes[i].state == PROCESS_ZOMBIE) {
             release_process(&processes[i]);

@@ -1,3 +1,8 @@
+/*
+ * GDT / TSS 初始化实现
+ * =====================
+ * 这里完成保护模式下的段表与任务状态段准备，为中断、系统调用和用户态切换服务。
+ */
 #include "gdt.h"
 #include "../include/string.h"
 
@@ -17,7 +22,7 @@ typedef struct {
     /* 段基址中间 8 位。 */
     uint8_t base_middle;
     /* 访问控制字节：段类型、是否可执行、特权级、是否存在等。 */
-    uint8_t access;//
+    uint8_t access;
     /* 高 4 位放粒度/位宽标志，低 4 位放段界限高 4 位。 */
     uint8_t granularity;
     /* 段基址高 8 位。 */
@@ -37,6 +42,10 @@ extern void gdt_load(const GdtPointer* ptr);
 extern void tss_load(void);
 
 typedef struct {
+    /*
+     * TSS 里最关键的是 ss0 / esp0：
+     * 当 CPU 从 ring3 进入 ring0 时，会自动切到这里指定的内核栈。
+     */
     uint32_t prev_tss;
     uint32_t esp0;
     uint32_t ss0;

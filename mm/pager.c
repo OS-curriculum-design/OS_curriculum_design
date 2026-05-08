@@ -1,3 +1,11 @@
+/*
+ * 简化换页器实现
+ * ===============
+ * 设计目标是用尽量少的代码演示“按需调页 + 页面换出”：
+ * - 注册页时先不给物理页，只在交换区预留槽位
+ * - 页面第一次访问触发 #PF，再换入内存
+ * - 物理页框满时，用二次机会 / clock 算法挑选牺牲页
+ */
 #include "pager.h"
 
 #include "../console/console.h"
@@ -5,9 +13,11 @@
 #include "pmm.h"
 #include "vmm.h"
 
+/* 交换区直接放在磁盘固定 LBA 区域上。 */
 #define PAGER_SWAP_LBA_BASE 2048U
 #define PAGER_SECTORS_PER_PAGE (PAGE_SIZE / ATA_SECTOR_SIZE)
 
+/* 每个逻辑页对应一个状态项。 */
 typedef struct {
     int used;
     int present;
@@ -19,7 +29,9 @@ typedef struct {
 } PagerPage;
 
 static PagerPage pager_pages[PAGER_MAX_PAGES];
+/* frame_pages[slot] 记录某个物理页框当前驻留的是哪一个逻辑页。 */
 static uint32_t frame_pages[PAGER_FRAME_LIMIT];
+/* 新注册页的初始内容统一为全 0。 */
 static uint8_t zero_page[PAGE_SIZE];
 
 static uint32_t registered_pages = 0;
@@ -36,6 +48,7 @@ static uint32_t align_down_page(uint32_t value) {
     return value & ~(PAGE_SIZE - 1U);
 }
 
+/* 每个逻辑页固定占用一个交换槽，因此 slot 和 LBA 的映射是线性的。 */
 static uint32_t swap_lba_for_slot(uint32_t slot) {
     return PAGER_SWAP_LBA_BASE + slot * PAGER_SECTORS_PER_PAGE;
 }
@@ -77,6 +90,7 @@ static int find_free_page_entry(uint32_t* page_index_out) {
 static int page_was_accessed(uint32_t page_index) {
     uint32_t entry = 0;
 
+    /* 通过页表项中的 accessed 位判断“最近是否被碰过”。 */
     if (!vmm_get_page_entry(pager_pages[page_index].virt_addr, &entry)) {
         return 0;
     }
@@ -88,6 +102,7 @@ static uint32_t choose_victim_frame(void) {
     while (1) {
         uint32_t page_index = frame_pages[clock_hand];
 
+        /* 给最近访问过的页一次“第二次机会”，清掉 accessed 后跳过它。 */
         if (page_was_accessed(page_index)) {
             vmm_clear_page_accessed(pager_pages[page_index].virt_addr);
             clock_hand = (clock_hand + 1U) % PAGER_FRAME_LIMIT;
@@ -102,6 +117,7 @@ static int evict_frame(uint32_t frame_slot) {
     uint32_t victim_index = frame_pages[frame_slot];
     PagerPage* victim = &pager_pages[victim_index];
 
+    /* 牺牲页先写回交换区，再解除映射、回收物理页。 */
     if (!swap_write_slot(victim->swap_slot, vmm_phys_to_virt(victim->phys_addr))) {
         console_write_line("pager: disk swap-out failed");
         return 0;
@@ -127,6 +143,7 @@ static int page_in(uint32_t page_index) {
     page_faults++;
     last_fault_addr = page->virt_addr;
 
+    /* 还有空闲页框时直接占用；否则必须先换出一个牺牲页。 */
     if (resident_frames < PAGER_FRAME_LIMIT) {
         frame_slot = resident_frames++;
     } else {
@@ -170,6 +187,7 @@ int pager_init(void) {
         return 0;
     }
 
+    /* 每个页项默认绑定到同编号交换槽，方便教学演示和调试。 */
     for (uint32_t i = 0; i < PAGER_MAX_PAGES; i++) {
         pager_pages[i].used = 0;
         pager_pages[i].present = 0;
@@ -208,6 +226,7 @@ int pager_register_page(uint32_t virt_addr, uint32_t flags) {
         return 0;
     }
 
+    /* 重复注册同一页时，仅更新权限标志。 */
     if (find_page_by_virt(virt_addr, &page_index)) {
         pager_pages[page_index].flags = flags;
         return 1;
@@ -218,6 +237,7 @@ int pager_register_page(uint32_t virt_addr, uint32_t flags) {
     }
 
     page_addr = align_down_page(virt_addr);
+    /* 把“该页还未被真正写过”的初始内容视作一页全 0 数据。 */
     if (!swap_write_slot(pager_pages[page_index].swap_slot, zero_page)) {
         return 0;
     }
@@ -236,6 +256,7 @@ int pager_register_page(uint32_t virt_addr, uint32_t flags) {
 int pager_handle_page_fault(uint32_t fault_addr, uint32_t err_code) {
     uint32_t page_index;
 
+    /* 只处理 not-present 页故障；权限错误应交给上层当成真正异常处理。 */
     if (!pager_ready || (err_code & 0x01)) {
         return 0;
     }

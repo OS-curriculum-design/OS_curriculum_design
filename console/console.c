@@ -1,24 +1,33 @@
+/*
+ * VGA 文本控制台实现
+ * ===================
+ * 这个模块直接操作 0xB8000 文本显存，是内核最早期、最基础的输出设施。
+ */
 #include "console.h"
 
 #define VGA_MEMORY ((uint16_t *)0xB8000)
 
+/* 当前命令行输出光标位置。 */
 static size_t cursor_row = 0;
 static size_t cursor_col = 0;
+/* VGA 文本属性：低 4 位是前景色，高 4 位是背景色。 */
 static uint8_t current_color = 0x07;
 
 static uint16_t vga_entry(unsigned char ch, uint8_t color)
 {
-    return (uint16_t)ch | ((uint16_t)color << 8); // 将字符拼成VGA格式，注意使用小端法，高位是color，低位是字符
+    /* VGA 文本模式每个单元占 2 字节：低字节字符，高字节颜色。 */
+    return (uint16_t)ch | ((uint16_t)color << 8);
 }
 
 void console_set_color(uint8_t fg, uint8_t bg)
 {
-    current_color = fg | (bg << 4); // fg=front ground bg=back ground 即设置背景色与字体色
+    current_color = fg | (bg << 4);
 }
 
-static void scroll_if_needed(void) // 滚屏逻辑
+/* 当输出越过屏幕底部时，把所有内容整体上移一行。 */
+static void scroll_if_needed(void)
 {
-    if (cursor_row < VGA_HEIGHT) // 没超出最后一行 不用滚屏
+    if (cursor_row < VGA_HEIGHT)
         return;
 
     for (size_t row = 1; row < VGA_HEIGHT; row++)
@@ -26,19 +35,19 @@ static void scroll_if_needed(void) // 滚屏逻辑
         for (size_t col = 0; col < VGA_WIDTH; col++)
         {
             VGA_MEMORY[(row - 1) * VGA_WIDTH + col] =
-                VGA_MEMORY[row * VGA_WIDTH + col]; // 将下一行拷贝到上一行
+                VGA_MEMORY[row * VGA_WIDTH + col];
         }
     }
 
     for (size_t col = 0; col < VGA_WIDTH; col++)
     {
-        VGA_MEMORY[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = vga_entry(' ', current_color); // 拷贝后最下面一行留空 此处为何不调用console_clear_line？
+        VGA_MEMORY[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = vga_entry(' ', current_color);
     }
 
-    cursor_row = VGA_HEIGHT - 1; // 光标为最后一行
+    cursor_row = VGA_HEIGHT - 1;
 }
 
-void console_clear_line(size_t row, uint8_t color) // 清空一行
+void console_clear_line(size_t row, uint8_t color)
 {
     for (size_t col = 0; col < VGA_WIDTH; col++)
     {
@@ -46,7 +55,7 @@ void console_clear_line(size_t row, uint8_t color) // 清空一行
     }
 }
 
-void console_clear(void) // 清屏
+void console_clear(void)
 {
     for (size_t row = 0; row < VGA_HEIGHT; row++)
     {
@@ -59,14 +68,14 @@ void console_clear(void) // 清屏
     cursor_col = 0;
 }
 
-void console_put_char_at(char c, size_t row, size_t col, uint8_t color) // 在指定位置写一个字符
+void console_put_char_at(char c, size_t row, size_t col, uint8_t color)
 {
     if (row >= VGA_HEIGHT || col >= VGA_WIDTH)
         return;
     VGA_MEMORY[row * VGA_WIDTH + col] = vga_entry(c, color);
 }
 
-void console_write_at(const char *str, size_t row, size_t col, uint8_t color) // 在指定位置写一个字符串
+void console_write_at(const char *str, size_t row, size_t col, uint8_t color)
 {
     size_t i = 0;
     while (str[i] && col + i < VGA_WIDTH)
@@ -76,10 +85,11 @@ void console_write_at(const char *str, size_t row, size_t col, uint8_t color) //
     }
 }
 
-void console_put_char(char c) // 打印一个字符
+void console_put_char(char c)
 {
     if (c == '\n')
     {
+        /* 换行只移动光标，不主动写入额外字符。 */
         cursor_col = 0;
         cursor_row++;
         scroll_if_needed();
@@ -90,6 +100,7 @@ void console_put_char(char c) // 打印一个字符
     {
         if (cursor_col > 0)
         {
+            /* 退格目前只支持行内回退，不跨行。 */
             cursor_col--;
             console_put_char_at(' ', cursor_row, cursor_col, current_color);
         }
@@ -107,7 +118,7 @@ void console_put_char(char c) // 打印一个字符
     }
 }
 
-void console_write(const char *str) // 打印字符串
+void console_write(const char *str)
 {
     while (*str)
     {
@@ -115,17 +126,17 @@ void console_write(const char *str) // 打印字符串
     }
 }
 
-void console_write_line(const char *str) // 打印一行，注意最后会添加回车
+void console_write_line(const char *str)
 {
     console_write(str);
     console_put_char('\n');
 }
 
-void console_write_dec(int value) // 写数字
+void console_write_dec(int value)
 {
-    char buf[16]; // 用于存储数字转换后的每一位
+    char buf[16];
     int i = 0;
-    int neg = 0; // 是否为负数
+    int neg = 0;
 
     if (value == 0)
     {
@@ -133,13 +144,13 @@ void console_write_dec(int value) // 写数字
         return;
     }
 
-    if (value < 0) // 转为正数打印
+    if (value < 0)
     {
         neg = 1;
         value = -value;
     }
 
-    while (value > 0) // 倒序插入数组
+    while (value > 0)
     {
         buf[i++] = '0' + (value % 10);
         value /= 10;
@@ -148,12 +159,13 @@ void console_write_dec(int value) // 写数字
     if (neg)
         buf[i++] = '-';
 
-    while (i--) // 倒序打印
+    while (i--)
     {
         console_put_char(buf[i]);
     }
 }
 
+/* 固定输出 8 个十六进制半字节，适合打印地址和寄存器。 */
 void console_write_hex(uint32_t value)
 {
     static const char hex_digits[] = "0123456789ABCDEF";

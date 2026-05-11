@@ -10,6 +10,7 @@
 #include "shell.h"
 #include "../console/console.h"
 #include "../drivers/ata.h"
+#include "../drivers/keyboard.h"
 #include "../fs/simplefs.h"
 #include "../include/string.h"
 #include "../kernel/process.h"
@@ -283,6 +284,11 @@ static int split_name_and_text(const char* args, char* name_out, uint32_t name_s
     return 1;
 }
 
+static int load_app_file(const char* name, uint32_t* image_size_out) {
+    return simplefs_read_file(name, fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, image_size_out) &&
+           *image_size_out != 0;
+}
+
 static void fs_print_mount_hint(void) {
     if (!simplefs_is_mounted()) {
         console_write_line("SimpleFS is not mounted. Run mkfs first.");
@@ -290,19 +296,37 @@ static void fs_print_mount_hint(void) {
 }
 
 static void print_help(void) {
-    console_write_line("Core:");
-    console_write_line("  help clear ticks mem uservm ring3 pager pagertest");
+    console_write_line("Quick start:");
+    console_write_line("  mkfs -> installapps -> ls");
+    console_write_line("  run hello.app");
+    console_write_line("  exec hello.app   then sched");
+
+    console_write_line("Apps:");
+    console_write_line("  installapps              write hello.app counter.app busy.app");
+    console_write_line("  exec <file.app>          create READY process from SimpleFS");
+    console_write_line("  run <file.app>           create and run now");
+
     console_write_line("Process:");
-    console_write_line("  ps run <app> spawn <app> sched autosched [on|off] reap slice [ticks]");
-    console_write_line("  apps: hello counter busy");
+    console_write_line("  ps sched reap");
+    console_write_line("  autosched [on|off]");
+    console_write_line("  slice [ticks]");
+
     console_write_line("Files:");
-    console_write_line("  mkfs fsstat pwd ls mkdir <dir> cd <dir|..|/> rmdir <dir>");
-    console_write_line("  touch <file> rm <file> cat <file> write <file> <text>");
-    console_write_line("  append <file> <text> edit <file> <text>");
-    console_write_line("FD:");
-    console_write_line("  open <file> close <fd> fds read <fd> writefd <fd> <text> seek <fd> <offset>");
-    console_write_line("Apps on FS:");
-    console_write_line("  installapps exec <file.app>");
+    console_write_line("  mkfs fsstat pwd ls");
+    console_write_line("  mkdir <dir> cd <dir|..|/> rmdir <dir>");
+    console_write_line("  touch <file> rm <file> cat <file>");
+    console_write_line("  write <file> <text>");
+    console_write_line("  append <file> <text>");
+    console_write_line("  edit <file> <text>");
+
+    console_write_line("File descriptors:");
+    console_write_line("  open <file> close <fd> fds");
+    console_write_line("  read <fd> writefd <fd> <text>");
+    console_write_line("  seek <fd> <offset>");
+
+    console_write_line("System:");
+    console_write_line("  help clear ticks mem");
+    console_write_line("  uservm ring3 pager pagertest");
 }
 
 // 执行一条已经输入完成的命令字符串。
@@ -511,19 +535,21 @@ static void run_command(const char* cmd) {
         return;
     }
 
-    // exec <file.app>：从 SimpleFS 读取程序镜像并创建进程。
+    // exec <file.app>：从 SimpleFS 读取程序镜像并创建 READY 进程。
     if (strncmp(cmd, "exec ", 5) == 0) {
         uint32_t image_size = 0;
         int pid;
 
         fs_print_mount_hint();
         if (simplefs_is_mounted()) {
-            if (!simplefs_read_file(skip_spaces(cmd + 5), fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) || image_size == 0) {
+            const char* name = skip_spaces(cmd + 5);
+
+            if (!load_app_file(name, &image_size)) {
                 console_write_line("exec failed: cannot read app.");
                 return;
             }
 
-            pid = process_spawn_from_buffer(skip_spaces(cmd + 5), fs_command_buffer, image_size);
+            pid = process_spawn_from_buffer(name, fs_command_buffer, image_size);
             if (pid == 0) {
                 console_write_line("exec failed: cannot create process.");
                 return;
@@ -643,18 +669,28 @@ static void run_command(const char* cmd) {
         return;
     }
 
-    // run hello：创建并运行一个内置用户进程。
+    // run <file.app>：从 SimpleFS 读取程序镜像，创建后立刻运行。
     if (strncmp(cmd, "run ", 4) == 0) {
-        if (!process_run_builtin(cmd + 4)) {
-            console_write_line("Usage: run hello|counter|busy");
-        }
-        return;
-    }
+        uint32_t image_size = 0;
+        int pid;
+        const char* name = skip_spaces(cmd + 4);
 
-    // spawn hello：只创建进程，放入 READY 队列，等待 sched 调度。
-    if (strncmp(cmd, "spawn ", 6) == 0) {
-        if (!process_spawn_builtin(cmd + 6)) {
-            console_write_line("Usage: spawn hello|counter|busy");
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!load_app_file(name, &image_size)) {
+                console_write_line("run failed: cannot read app.");
+                return;
+            }
+
+            pid = process_spawn_from_buffer(name, fs_command_buffer, image_size);
+            if (pid == 0) {
+                console_write_line("run failed: cannot create process.");
+                return;
+            }
+
+            if (!process_run_pid(pid)) {
+                console_write_line("run failed: cannot run process.");
+            }
         }
         return;
     }
@@ -807,13 +843,39 @@ void shell_end_async_output(void) {
     async_output_dirty = 0;
 }
 
-// 处理从键盘传入的单个字符。
+// 处理从键盘传入的单个按键。
 //
 // 这是 Shell 的输入核心：
 // - 普通字符：追加到缓冲区并回显
 // - 退格：删除缓冲区末尾字符并擦除显示
 // - 回车：结束当前命令，执行后重新显示提示符
-void shell_handle_char(char c) {
+void shell_handle_key(uint16_t key) {
+    char c;
+
+    if (key == KEYBOARD_KEY_UP) {
+        console_scroll_up(1);
+        return;
+    }
+
+    if (key == KEYBOARD_KEY_DOWN) {
+        console_scroll_down(1);
+        return;
+    }
+
+    if (key > 0x00FFU) {
+        return;
+    }
+
+    c = (char)key;
+
+    /*
+     * 当用户正在查看历史输出时，任何“实际输入”都会先把视图拉回到底部，
+     * 这样新输入的命令和提示符始终可见。
+     */
+    if (console_is_scrolled()) {
+        console_scroll_to_bottom();
+    }
+
     // 回车/换行：表示一条命令输入完成。
     if (c == '\n') {
         // 先在屏幕上换行，让执行结果显示在下一行。

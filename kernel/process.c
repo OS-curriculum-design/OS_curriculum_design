@@ -409,27 +409,6 @@ void process_init(void) {
     auto_schedule_enabled = 1;
 }
 
-int process_spawn_builtin(const char* name) {
-    static uint8_t image[PROCESS_IMAGE_MAX];
-    uint32_t image_size;
-    int pid;
-
-    /* 先把内建程序翻译成一页机器码镜像，再走通用建进程流程。 */
-    if (!process_build_builtin_image(name, image, sizeof(image), &image_size)) {
-        return 0;
-    }
-
-    pid = process_spawn_from_buffer(name, image, image_size);
-    if (pid == 0) {
-        return 0;
-    }
-
-    console_write("created process pid=");
-    console_write_dec(pid);
-    console_put_char('\n');
-    return pid;
-}
-
 int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out) {
     uint32_t image_size;
 
@@ -491,16 +470,10 @@ int process_schedule_auto(void) {
     return 0;
 }
 
-int process_run_builtin(const char* name) {
-    int pid = process_spawn_builtin(name);
+int process_run_pid(int pid) {
     Process* process;
 
-    if (pid == 0) {
-        return 0;
-    }
-
     if (!process_run(pid)) {
-        console_write_line("process run failed");
         return 0;
     }
 

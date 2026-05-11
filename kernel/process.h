@@ -22,18 +22,16 @@ typedef enum {
 
 /* 初始化进程表与调度器状态。 */
 void process_init(void);
-/* 由内建样例程序名创建一个进程。 */
-int process_spawn_builtin(const char* name);
 /* 由内存中的应用镜像创建一个进程。 */
 int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size);
 /* 把 hello / counter / busy 构造成可执行镜像。 */
 int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out);
+/* 立即运行一个已创建的 READY 进程。 */
+int process_run_pid(int pid);
 /* 调度一个 READY 进程运行。 */
 int process_schedule(void);
 /* 自动调度入口，供时钟中断或主循环调用。 */
 int process_schedule_auto(void);
-/* 创建并立即运行一个内建程序。 */
-int process_run_builtin(const char* name);
 /* 是否存在 READY 状态的进程。 */
 int process_has_ready(void);
 /* 查询自动调度开关。 */

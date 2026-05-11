@@ -12,6 +12,7 @@
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
+#define CONSOLE_HISTORY_LINES 512
 
 /* 清空整个屏幕，并把光标重置到左上角。 */
 void console_clear(void);
@@ -34,5 +35,13 @@ void console_put_char_at(char c, size_t row, size_t col, uint8_t color);
 void console_write_at(const char* str, size_t row, size_t col, uint8_t color);
 /* 用指定颜色把某一整行清空。 */
 void console_clear_line(size_t row, uint8_t color);
+/* 将视图向上滚动指定行数。 */
+void console_scroll_up(size_t lines);
+/* 将视图向下滚动指定行数。 */
+void console_scroll_down(size_t lines);
+/* 把视图切回最新输出所在的位置。 */
+void console_scroll_to_bottom(void);
+/* 当前是否正在查看历史内容而不是底部。 */
+int console_is_scrolled(void);
 
 #endif

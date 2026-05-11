@@ -48,11 +48,11 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     shell_prompt();
 
     while (1) {
-        char c;
+        uint16_t key;
 
         /* 先处理用户输入，保持 Shell 响应及时。 */
-        while (keyboard_read_char(&c)) {
-            shell_handle_char(c);
+        while (keyboard_read_key(&key)) {
+            shell_handle_key(key);
         }
 
         /* 再处理由时钟中断累计下来的调度事件。 */
@@ -70,7 +70,7 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
          * - hlt 让 CPU 睡眠到下一次中断到来
          */
         interrupts_disable();
-        if (!keyboard_has_char() && !timer_has_schedule_event()) {
+        if (!keyboard_has_key() && !timer_has_schedule_event()) {
             __asm__ __volatile__("sti\n\thlt" : : : "memory");
         } else {
             interrupts_enable();

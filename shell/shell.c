@@ -317,7 +317,6 @@ static void print_help(void) {
     console_write_line("  touch <file> rm <file> cat <file>");
     console_write_line("  write <file> <text>");
     console_write_line("  append <file> <text>");
-    console_write_line("  edit <file> <text>");
 
     console_write_line("File descriptors:");
     console_write_line("  open <file> close <fd> fds");
@@ -488,23 +487,6 @@ static void run_command(const char* cmd) {
                 console_write_line("file appended.");
             } else {
                 console_write_line("Usage: append <name> <text>");
-            }
-        }
-        return;
-    }
-
-    // edit <name> <text>：第一版简化编辑器，本质是覆盖写入文本。
-    if (strncmp(cmd, "edit ", 5) == 0) {
-        char name[28];
-        const char* text;
-
-        fs_print_mount_hint();
-        if (simplefs_is_mounted()) {
-            if (split_name_and_text(cmd + 5, name, sizeof(name), &text) &&
-                simplefs_write_file(name, (const uint8_t*)text, (uint32_t)strlen(text))) {
-                console_write_line("file edited.");
-            } else {
-                console_write_line("Usage: edit <name> <text>");
             }
         }
         return;

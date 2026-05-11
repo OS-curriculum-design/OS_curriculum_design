@@ -26,6 +26,7 @@
 #define INPUT_MAX 128
 #define PAGER_TEST_BASE 0x40000000U
 #define PAGER_TEST_PAGE_COUNT 20U
+#define BIGFILE_TEST_NAME "bigfile.test"
 
 // 保存用户当前正在输入的一整行命令。
 // 这是一个静态全局缓冲区，Shell 按“整行输入、回车执行”的方式工作。
@@ -289,6 +290,82 @@ static int load_app_file(const char* name, uint32_t* image_size_out) {
            *image_size_out != 0;
 }
 
+static uint8_t bigfile_test_byte(uint32_t index) {
+    static const char pattern[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    return (uint8_t)pattern[index % (sizeof(pattern) - 1U)];
+}
+
+static int run_bigfile_test_case(uint32_t size) {
+    uint32_t bytes_read = 0;
+
+    for (uint32_t i = 0; i < size; i++) {
+        fs_command_buffer[i] = bigfile_test_byte(i);
+    }
+
+    if (!simplefs_write_file(BIGFILE_TEST_NAME, fs_command_buffer, size)) {
+        if (size > SIMPLEFS_MAX_FILE_SIZE) {
+            console_write("bigfiletest ");
+            console_write_dec((int)size);
+            console_write_line(": expected failure (size exceeds max).");
+            return 1;
+        }
+
+        console_write("bigfiletest ");
+        console_write_dec((int)size);
+        console_write_line(": write failed.");
+        return 0;
+    }
+
+    if (!simplefs_read_file(BIGFILE_TEST_NAME, fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &bytes_read)) {
+        console_write("bigfiletest ");
+        console_write_dec((int)size);
+        console_write_line(": readback failed.");
+        return 0;
+    }
+
+    if (bytes_read != size) {
+        console_write("bigfiletest ");
+        console_write_dec((int)size);
+        console_write(": size mismatch, read ");
+        console_write_dec((int)bytes_read);
+        console_put_char('\n');
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < size; i++) {
+        if (fs_command_buffer[i] != bigfile_test_byte(i)) {
+            console_write("bigfiletest ");
+            console_write_dec((int)size);
+            console_write(": verify failed at offset ");
+            console_write_dec((int)i);
+            console_put_char('\n');
+            return 0;
+        }
+    }
+
+    console_write("bigfiletest ");
+    console_write_dec((int)size);
+    console_write_line(": ok.");
+    return 1;
+}
+
+static void run_bigfile_test_suite(void) {
+    static const uint32_t sizes[] = {511U, 512U, 513U, 3072U, 3073U, 8192U, SIMPLEFS_MAX_FILE_SIZE, SIMPLEFS_MAX_FILE_SIZE + 1U};
+    int all_ok = 1;
+
+    console_write("bigfiletest: max file size = ");
+    console_write_dec((int)SIMPLEFS_MAX_FILE_SIZE);
+    console_put_char('\n');
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(sizes) / sizeof(sizes[0])); i++) {
+        if (!run_bigfile_test_case(sizes[i])) {
+            all_ok = 0;
+        }
+    }
+
+    console_write_line(all_ok ? "bigfiletest suite: all passed." : "bigfiletest suite: failed.");
+}
+
 static void fs_print_mount_hint(void) {
     if (!simplefs_is_mounted()) {
         console_write_line("SimpleFS is not mounted. Run mkfs first.");
@@ -317,6 +394,7 @@ static void print_help(void) {
     console_write_line("  touch <file> rm <file> cat <file>");
     console_write_line("  write <file> <text>");
     console_write_line("  append <file> <text>");
+    console_write_line("  bigfiletest [size]");
 
     console_write_line("File descriptors:");
     console_write_line("  open <file> close <fd> fds");
@@ -488,6 +566,30 @@ static void run_command(const char* cmd) {
             } else {
                 console_write_line("Usage: append <name> <text>");
             }
+        }
+        return;
+    }
+
+    // bigfiletest [size]：自动生成大文件测试数据，写入并读回校验。
+    if (strcmp(cmd, "bigfiletest") == 0) {
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            run_bigfile_test_suite();
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "bigfiletest ", 12) == 0) {
+        uint32_t size = 0;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_uint(skip_spaces(cmd + 12), &size)) {
+                console_write_line("Usage: bigfiletest [size]");
+                return;
+            }
+
+            run_bigfile_test_case(size);
         }
         return;
     }

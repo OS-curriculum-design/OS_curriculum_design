@@ -6,14 +6,17 @@
 /*
  * SimpleFS 接口
  * =============
- * 这是一个教学用极简文件系统，支持：
- * - 单级目录树中的当前目录切换
+ * 这是一个教学用极简 inode 文件系统，支持：
+ * - boot block / info block / inode table / data blocks 固定布局
+ * - 目录文件由 {name, inode} 项组成，并维护 "." / ".."
+ * - inode 使用若干直接块 + 一个一级间接索引块
+ * - 单级命令接口下的当前目录切换
  * - 普通文件创建、删除、读写、追加
  * - 目录创建/删除
  * - 简单的 open/read/write/seek 文件描述符接口
  */
 
-#define SIMPLEFS_MAX_FILE_SIZE 4096U
+#define SIMPLEFS_MAX_FILE_SIZE 68608U
 
 /* 初始化并尝试从磁盘挂载文件系统。 */
 int simplefs_init(void);

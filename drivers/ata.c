@@ -9,16 +9,17 @@
 #include "io.h"
 
 /* IDE 主通道寄存器端口定义。 */
-#define ATA_DATA       0x1F0
-#define ATA_ERROR      0x1F1
-#define ATA_SECCOUNT   0x1F2
+#define ATA_DATA       0x1F0//读写数据
+#define ATA_ERROR      0x1F1//错误寄存器
+#define ATA_SECCOUNT   0x1F2//扇区数量寄存器
 #define ATA_LBA_LOW    0x1F3
 #define ATA_LBA_MID    0x1F4
-#define ATA_LBA_HIGH   0x1F5
-#define ATA_DRIVE      0x1F6
-#define ATA_STATUS     0x1F7
-#define ATA_COMMAND    0x1F7
-#define ATA_ALT_STATUS 0x3F6
+#define ATA_LBA_HIGH   0x1F5//设三个放LBA地址低24位
+//LBA的地址就是指磁盘扇区编号。28位每个块512字节。共128G
+#define ATA_DRIVE      0x1F6//选择主盘/从盘和LBA的高四位。低四位是地址，高四位固定0xE0主盘
+#define ATA_STATUS     0x1F7//状态寄存器
+#define ATA_COMMAND    0x1F7//命令寄存器。端口号同上。写时是发命令，读时是看状态
+#define ATA_ALT_STATUS 0x3F6//备用状态寄存器，读它作为延时
 
 #define ATA_CMD_READ_SECTORS  0x20
 #define ATA_CMD_WRITE_SECTORS 0x30

@@ -16,6 +16,18 @@
 #include "../drivers/ata.h"
 #include "../include/string.h"
 
+/*
+ * 磁盘布局常量
+ * ============
+ * SimpleFS 并不从磁盘 0 号扇区开始占用空间，而是故意把文件系统整体
+ * 放在较靠后的位置，避免和启动区、GRUB 之类的内容发生冲突。
+ *
+ * 布局如下：
+ *   LBA 4096                 : boot block
+ *   LBA 4097                 : info block
+ *   LBA 4098 ~ ...           : inode table
+ *   inode table 之后的区域   : data blocks
+ */
 #define SIMPLEFS_BOOT_MAGIC 0x544F4F42U
 #define SIMPLEFS_MAGIC 0x34464E49U
 #define SIMPLEFS_VERSION 2U
@@ -38,6 +50,7 @@
 #define SIMPLEFS_INODE_TYPE_REGULAR   1U
 #define SIMPLEFS_INODE_TYPE_DIRECTORY 2U
 
+/* boot block 只保存最基础的识别信息，便于启动后快速确认这里是不是 SimpleFS。 */
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -46,6 +59,12 @@ typedef struct {
     uint8_t reserved[ATA_SECTOR_SIZE - 28U];
 } __attribute__((packed)) SimpleFsBootBlock;
 
+/*
+ * info block 是文件系统真正的“总控信息”：
+ * - inode/data 位图记录哪些对象已经被占用
+ * - inode table / data 区的位置和大小也都放在这里
+ * 挂载时会优先读取并校验这一块。
+ */
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -62,6 +81,13 @@ typedef struct {
     uint8_t reserved[ATA_SECTOR_SIZE - 304U];
 } __attribute__((packed)) SimpleFsInfoBlock;
 
+/*
+ * inode 描述一个文件或目录：
+ * - type 区分普通文件 / 目录
+ * - size 表示字节数
+ * - direct_blocks 提供若干直接块
+ * - indirect_block 指向一级间接索引块
+ */
 typedef struct {
     uint8_t type;
     uint8_t reserved0;
@@ -72,11 +98,16 @@ typedef struct {
     uint32_t reserved[7];
 } __attribute__((packed)) SimpleFsInode;
 
+/* 目录文件中的每一项都是一个固定长度的 {inode, name} 映射。 */
 typedef struct {
     uint32_t inode;
     char name[28];
 } __attribute__((packed)) SimpleFsDirectoryEntry;
 
+/*
+ * 这是教学版的“打开文件表”。
+ * 它只保存在内存里，不会写盘；系统重启后所有 fd 都会消失。
+ */
 typedef struct {
     int used;
     uint32_t inode_index;
@@ -94,6 +125,12 @@ typedef union {
     SimpleFsDirectoryEntry directory_entries[SIMPLEFS_MAX_DIRECTORY_ENTRIES];
 } SimpleFsDirectoryScratch;
 
+/*
+ * 下面这些静态全局变量就是文件系统挂载后的内存镜像：
+ * - boot_block / info_block / inode_table 来自磁盘
+ * - open_files / current_directory / fs_mounted 属于运行时状态
+ * - directory_scratch / file_scratch 是临时缓冲区，避免频繁分配内存
+ */
 static SimpleFsBootBlock boot_block;
 static SimpleFsInfoBlock info_block;
 static SimpleFsInode inode_table[SIMPLEFS_MAX_INODES];
@@ -103,6 +140,7 @@ static uint8_t file_scratch[SIMPLEFS_MAX_FILE_SIZE];
 static uint32_t current_directory = SIMPLEFS_ROOT_INODE;
 static int fs_mounted = 0;
 
+/* 安全拷贝目录项名字，始终保证结果以 '\0' 结尾。 */
 static void copy_name(char* dst, const char* src, uint32_t capacity) {
     uint32_t i = 0;
 
@@ -117,10 +155,17 @@ static void copy_name(char* dst, const char* src, uint32_t capacity) {
     dst[i] = '\0';
 }
 
+/* "." 与 ".." 在目录里有特殊含义，创建普通名字时要排除它们。 */
 static int name_is_special(const char* name) {
     return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
 }
 
+/*
+ * 文件名合法性检查：
+ * - 不能为空
+ * - 不能超过目录项固定长度
+ * - 不能伪装成 "." / ".." / "/"
+ */
 static int valid_name(const char* name) {
     uint32_t length;
 
@@ -136,6 +181,7 @@ static int valid_name(const char* name) {
     return !name_is_special(name) && strcmp(name, "/") != 0;
 }
 
+/* 把 inode 的所有块指针初始化为“无效块”，表示当前还没有分配数据块。 */
 static void clear_block_pointers(SimpleFsInode* inode) {
     for (uint32_t i = 0; i < SIMPLEFS_DIRECT_BLOCKS; i++) {
         inode->direct_blocks[i] = SIMPLEFS_INVALID_BLOCK;
@@ -143,42 +189,51 @@ static void clear_block_pointers(SimpleFsInode* inode) {
     inode->indirect_block = SIMPLEFS_INVALID_BLOCK;
 }
 
+/* 把一张 uint32_t 表批量填成同一个值，常用于初始化间接块索引表。 */
 static void fill_u32_table(uint32_t* table, uint32_t count, uint32_t value) {
     for (uint32_t i = 0; i < count; i++) {
         table[i] = value;
     }
 }
 
+/* 位图工具：测试某个 inode / data block 当前是否已被占用。 */
 static int bitmap_test(const uint8_t* bitmap, uint32_t index) {
     return (bitmap[index / 8U] & (uint8_t)(1U << (index % 8U))) != 0;
 }
 
+/* 位图工具：标记某个 inode / data block 为已占用。 */
 static void bitmap_set(uint8_t* bitmap, uint32_t index) {
     bitmap[index / 8U] |= (uint8_t)(1U << (index % 8U));
 }
 
+/* 位图工具：释放某个 inode / data block。 */
 static void bitmap_clear(uint8_t* bitmap, uint32_t index) {
     bitmap[index / 8U] &= (uint8_t)~(1U << (index % 8U));
 }
 
+/* data block 编号是相对于数据区的逻辑编号，这里把它换算成真实 LBA。 */
 static uint32_t block_lba(uint32_t block) {
     return info_block.data_lba + block;
 }
 
+/* 把内存中的 boot block 同步回磁盘固定位置。 */
 static int write_boot_block(void) {
     return ata_write_sectors(SIMPLEFS_BOOT_LBA, 1, &boot_block);
 }
 
+/* 把 info block 同步回磁盘；位图变化后通常都要调用它。 */
 static int write_info_block(void) {
     return ata_write_sectors(SIMPLEFS_INFO_LBA, 1, &info_block);
 }
 
+/* inode table 占若干连续扇区，这里统一整表写回。 */
 static int write_inode_table(void) {
     return ata_write_sectors(info_block.inode_table_lba,
                              (uint8_t)info_block.inode_table_sectors,
                              inode_table);
 }
 
+/* 系统启动或重新格式化后，把打开文件表重置为空。 */
 static void reset_open_files(void) {
     for (int i = 0; i < SIMPLEFS_MAX_OPEN_FILES; i++) {
         open_files[i].used = 0;
@@ -188,6 +243,13 @@ static void reset_open_files(void) {
     }
 }
 
+/*
+ * 从磁盘读取并校验文件系统元数据。
+ * 这一步就是本项目里“挂载”的核心：
+ * - 读 boot block / info block / inode table
+ * - 校验 magic、版本号、布局参数
+ * - 检查根 inode 是否存在且确实是目录
+ */
 static int read_metadata(void) {
     if (!ata_read_sectors(SIMPLEFS_BOOT_LBA, 1, &boot_block)) {
         return 0;
@@ -227,6 +289,11 @@ static int read_metadata(void) {
     return 1;
 }
 
+/*
+ * 找到一个空闲数据块并分配出去。
+ * 分配时会顺便把整个扇区清零，这样新文件读到的内容是确定的，
+ * 也避免泄露之前留在该块里的旧数据。
+ */
 static int allocate_data_block(uint32_t* block_out) {
     uint8_t zero[ATA_SECTOR_SIZE];
 
@@ -249,6 +316,11 @@ static int allocate_data_block(uint32_t* block_out) {
     return 0;
 }
 
+/*
+ * 读一级间接索引块。
+ * 如果 inode 还没有间接块，就把输出表视为“全是无效块”，并返回成功，
+ * 这样调用者不需要额外区分“没有间接块”和“读取失败”。
+ */
 static int read_indirect_block(const SimpleFsInode* inode, uint32_t* table_out) {
     fill_u32_table(table_out, SIMPLEFS_INDIRECT_ENTRIES, SIMPLEFS_INVALID_BLOCK);
 
@@ -259,6 +331,7 @@ static int read_indirect_block(const SimpleFsInode* inode, uint32_t* table_out) 
     return ata_read_sectors(block_lba(inode->indirect_block), 1, table_out);
 }
 
+/* 把内存中的一级间接索引表写回磁盘。 */
 static int write_indirect_block(const SimpleFsInode* inode, const uint32_t* table) {
     if (inode->indirect_block == SIMPLEFS_INVALID_BLOCK) {
         return 0;
@@ -267,6 +340,16 @@ static int write_indirect_block(const SimpleFsInode* inode, const uint32_t* tabl
     return ata_write_sectors(block_lba(inode->indirect_block), 1, table);
 }
 
+/*
+ * 释放一个 inode 持有的全部数据块。
+ * 这会同时处理：
+ * - 直接块
+ * - 一级间接块中记录的所有数据块
+ * - 一级间接块本身
+ *
+ * 注意：这里只更新位图和 inode 内存状态，不负责把元数据写盘；
+ * 调用者需要在合适时机再写回 info block / inode table。
+ */
 static void free_inode_blocks(SimpleFsInode* inode) {
     uint32_t indirect_table[SIMPLEFS_INDIRECT_ENTRIES];
 
@@ -293,6 +376,7 @@ static void free_inode_blocks(SimpleFsInode* inode) {
     inode->size = 0;
 }
 
+/* 删除文件前要检查该 inode 是否还被某个 fd 打开着。 */
 static int inode_is_open(uint32_t inode_index) {
     for (int fd = 0; fd < SIMPLEFS_MAX_OPEN_FILES; fd++) {
         if (open_files[fd].used && open_files[fd].inode_index == inode_index) {
@@ -303,6 +387,10 @@ static int inode_is_open(uint32_t inode_index) {
     return 0;
 }
 
+/*
+ * 分配一个新的 inode。
+ * 这里会立刻把 inode 位图和 inode table 写回磁盘，保证分配结果持久化。
+ */
 static int allocate_inode(uint8_t type, uint32_t* inode_out) {
     for (uint32_t inode_index = 0; inode_index < SIMPLEFS_MAX_INODES; inode_index++) {
         if (!bitmap_test(info_block.inode_bitmap, inode_index)) {
@@ -326,6 +414,12 @@ static int allocate_inode(uint8_t type, uint32_t* inode_out) {
     return 0;
 }
 
+/*
+ * 释放一个 inode：
+ * - 根 inode 不能释放
+ * - 先回收其所有数据块
+ * - 再清 inode 自身并更新位图
+ */
 static int release_inode(uint32_t inode_index) {
     if (inode_index >= SIMPLEFS_MAX_INODES ||
         !bitmap_test(info_block.inode_bitmap, inode_index) ||
@@ -343,6 +437,11 @@ static int release_inode(uint32_t inode_index) {
     return write_inode_table();
 }
 
+/*
+ * 根据“逻辑块号”找到文件真正对应的数据块号。
+ * 逻辑块号 0、1、2... 是从文件视角看的第几个块；
+ * 真正写盘时还需要把它映射成 direct block 或 indirect block 中的编号。
+ */
 static int get_file_block(const SimpleFsInode* inode,
                           uint32_t logical_block,
                           uint32_t* block_out,
@@ -370,6 +469,13 @@ static int get_file_block(const SimpleFsInode* inode,
     return 1;
 }
 
+/*
+ * 从指定 inode 中按字节读取数据。
+ * 这个函数是真正的文件内容读取核心，支持：
+ * - 从任意 offset 开始
+ * - 跨多个扇区读取
+ * - 同时处理直接块和一级间接块
+ */
 static int read_inode_bytes(uint32_t inode_index,
                             uint32_t offset,
                             uint8_t* buffer,
@@ -409,13 +515,16 @@ static int read_inode_bytes(uint32_t inode_index,
     while (copied < remaining) {
         uint32_t to_copy;
 
+        /* 先根据逻辑块号找到当前应该读取哪一个磁盘块。 */
         if (!get_file_block(inode, logical_block, &block, indirect_table, &indirect_loaded)) {
             return 0;
         }
         if (block == SIMPLEFS_INVALID_BLOCK) {
+            /* 理论上正常文件不该在中间出现“洞”，这里做保守退出。 */
             break;
         }
 
+        /* 每次先整扇区读入，再从里面截取自己真正需要的字节范围。 */
         if (!ata_read_sectors(block_lba(block), 1, sector)) {
             return 0;
         }
@@ -438,6 +547,14 @@ static int read_inode_bytes(uint32_t inode_index,
     return 1;
 }
 
+/*
+ * 把整个 inode 的内容“重写”为 data[0..size)。
+ * 当前实现采用最简单直观的策略：
+ * - 先释放旧块
+ * - 再按新内容重新分配并写入
+ *
+ * 这样实现简单，但代价是覆盖写不是原地更新。
+ */
 static int write_inode_data(uint32_t inode_index, const uint8_t* data, uint32_t size) {
     uint32_t required_blocks;
     uint32_t written = 0;
@@ -455,6 +572,11 @@ static int write_inode_data(uint32_t inode_index, const uint8_t* data, uint32_t 
 
     inode = &inode_table[inode_index];
     fill_u32_table(indirect_table, SIMPLEFS_INDIRECT_ENTRIES, SIMPLEFS_INVALID_BLOCK);
+
+    /*
+     * 这是“覆盖写”语义，不是“增量写”语义。
+     * 所以旧内容先全部回收，再重新布置新文件占用的块。
+     */
     free_inode_blocks(inode);
     required_blocks = (size + ATA_SECTOR_SIZE - 1U) / ATA_SECTOR_SIZE;
 
@@ -483,6 +605,7 @@ static int write_inode_data(uint32_t inode_index, const uint8_t* data, uint32_t 
         }
 
         if (logical < SIMPLEFS_DIRECT_BLOCKS) {
+            /* 前几个块直接放进 inode 的 direct_blocks。 */
             inode->direct_blocks[logical] = block;
         } else {
             uint32_t indirect_index = logical - SIMPLEFS_DIRECT_BLOCKS;
@@ -490,6 +613,7 @@ static int write_inode_data(uint32_t inode_index, const uint8_t* data, uint32_t 
             if (!needs_indirect) {
                 uint32_t indirect_block = SIMPLEFS_INVALID_BLOCK;
 
+                /* 第一次越过直接块上限时，才真正为一级间接块分配空间。 */
                 if (!allocate_data_block(&indirect_block)) {
                     goto fail;
                 }
@@ -518,12 +642,19 @@ static int write_inode_data(uint32_t inode_index, const uint8_t* data, uint32_t 
     return write_inode_table();
 
 fail:
+    /*
+     * 失败回滚策略：
+     * - 尽量把刚分到的块全部释放掉
+     * - 再把位图和 inode table 刷回磁盘
+     * 这样至少不会把磁盘留在明显不一致的状态。
+     */
     free_inode_blocks(inode);
     write_info_block();
     write_inode_table();
     return 0;
 }
 
+/* 把目录文件读入临时缓冲区，并解析出当前共有多少个目录项。 */
 static int read_directory_entries(uint32_t dir_inode, uint32_t* count_out) {
     uint32_t bytes_read = 0;
     SimpleFsInode* inode;
@@ -547,12 +678,19 @@ static int read_directory_entries(uint32_t dir_inode, uint32_t* count_out) {
     return 1;
 }
 
+/* 把临时缓冲区中的目录项整体写回某个目录 inode。 */
 static int write_directory_entries(uint32_t dir_inode, uint32_t count) {
     return write_inode_data(dir_inode,
                             directory_scratch.bytes,
                             count * (uint32_t)sizeof(SimpleFsDirectoryEntry));
 }
 
+/*
+ * 初始化一个新目录：
+ * - 第 0 项是 "."
+ * - 第 1 项是 ".."
+ * 这和 Unix 风格目录保持一致。
+ */
 static int init_directory_file(uint32_t dir_inode, uint32_t parent_inode) {
     memset(directory_scratch.bytes, 0, sizeof(directory_scratch.bytes));
     directory_scratch.directory_entries[0].inode = dir_inode;
@@ -562,6 +700,7 @@ static int init_directory_file(uint32_t dir_inode, uint32_t parent_inode) {
     return write_directory_entries(dir_inode, 2U);
 }
 
+/* 在指定目录里按名字查找目录项，可选返回目录项内容和所在槽位。 */
 static int find_entry_in_directory(uint32_t dir_inode,
                                    const char* name,
                                    SimpleFsDirectoryEntry* entry_out,
@@ -588,6 +727,7 @@ static int find_entry_in_directory(uint32_t dir_inode,
     return 0;
 }
 
+/* 在目录末尾追加一个新的 {name, inode} 项。 */
 static int append_entry_to_directory(uint32_t dir_inode,
                                      const char* name,
                                      uint32_t child_inode) {
@@ -606,6 +746,10 @@ static int append_entry_to_directory(uint32_t dir_inode,
     return write_directory_entries(dir_inode, count + 1U);
 }
 
+/*
+ * 删除目录中的一个名字。
+ * 当前实现直接把后面的项整体前移，因此目录项在磁盘上是紧凑排列的。
+ */
 static int remove_entry_from_directory(uint32_t dir_inode,
                                        const char* name,
                                        SimpleFsDirectoryEntry* removed_out) {
@@ -631,6 +775,7 @@ static int remove_entry_from_directory(uint32_t dir_inode,
     return write_directory_entries(dir_inode, count - 1U);
 }
 
+/* 目录的父目录 inode 来自 ".." 目录项。 */
 static int get_parent_inode(uint32_t dir_inode, uint32_t* parent_out) {
     SimpleFsDirectoryEntry entry;
 
@@ -642,6 +787,7 @@ static int get_parent_inode(uint32_t dir_inode, uint32_t* parent_out) {
     return 1;
 }
 
+/* 反向查找：已知父目录和子 inode，找出这个子项在父目录里的名字。 */
 static int find_name_for_inode(uint32_t dir_inode, uint32_t child_inode, char* name_out) {
     uint32_t count = 0;
 
@@ -660,6 +806,7 @@ static int find_name_for_inode(uint32_t dir_inode, uint32_t child_inode, char* n
     return 0;
 }
 
+/* 目录是否为空，等价于“除了 . 和 .. 之外没有别的条目”。 */
 static int directory_is_empty(uint32_t dir_inode) {
     uint32_t count = 0;
 
@@ -676,10 +823,12 @@ static int directory_is_empty(uint32_t dir_inode) {
     return 1;
 }
 
+/* 对外很多操作都只在当前工作目录里查名字，这里做一个小包装。 */
 static int lookup_entry_in_current_directory(const char* name, SimpleFsDirectoryEntry* entry_out) {
     return find_entry_in_directory(current_directory, name, entry_out, (uint32_t*)0);
 }
 
+/* 为了让 ls 输出更整齐，把文件名补齐到固定宽度。 */
 static void print_padded_name(const char* name, uint32_t width) {
     uint32_t length = (uint32_t)strlen(name);
 
@@ -690,6 +839,10 @@ static void print_padded_name(const char* name, uint32_t width) {
     }
 }
 
+/*
+ * 递归打印某个 inode 对应的绝对路径。
+ * 做法是不断向上找父目录，回溯时再把各级名字依次输出。
+ */
 static void print_path_to_inode(uint32_t inode_index) {
     char name[28];
     uint32_t parent = SIMPLEFS_ROOT_INODE;
@@ -715,6 +868,7 @@ static void print_path_to_inode(uint32_t inode_index) {
     console_write(name);
 }
 
+/* 启动时调用：尝试从磁盘读取并挂载已经存在的 SimpleFS。 */
 int simplefs_init(void) {
     fs_mounted = 0;
     current_directory = SIMPLEFS_ROOT_INODE;
@@ -728,6 +882,12 @@ int simplefs_init(void) {
     return fs_mounted;
 }
 
+/*
+ * 格式化文件系统：
+ * - 清空内存中的元数据镜像
+ * - 构造 boot/info/inode table
+ * - 建立根目录 inode，并写入 "." 与 ".."
+ */
 int simplefs_format(void) {
     if (!ata_is_ready()) {
         return 0;
@@ -780,10 +940,12 @@ int simplefs_format(void) {
     return 1;
 }
 
+/* 仅返回当前挂载状态，不做任何 I/O。 */
 int simplefs_is_mounted(void) {
     return fs_mounted;
 }
 
+/* 列出当前目录下的普通目录项，跳过 "." 和 ".."。 */
 void simplefs_list(void) {
     uint32_t count = 0;
 
@@ -822,6 +984,7 @@ void simplefs_list(void) {
     }
 }
 
+/* 打印文件系统整体占用情况，便于观察 inode/块使用率。 */
 void simplefs_print_stats(void) {
     uint32_t used_blocks = 0;
     uint32_t used_inodes = 0;
@@ -878,6 +1041,7 @@ void simplefs_print_stats(void) {
     console_write_line(" bytes");
 }
 
+/* 打印当前工作目录。 */
 void simplefs_print_working_directory(void) {
     if (!fs_mounted) {
         console_write_line("SimpleFS is not mounted. Run mkfs first.");
@@ -893,6 +1057,7 @@ void simplefs_print_working_directory(void) {
     console_put_char('\n');
 }
 
+/* 在当前目录下创建一个空普通文件。 */
 int simplefs_create(const char* name) {
     uint32_t inode_index = 0;
 
@@ -909,6 +1074,10 @@ int simplefs_create(const char* name) {
         return 0;
     }
 
+    /*
+     * 这里把当前目录的 link_count 也加一。
+     * 它更像一个教学用统计字段，而不是严格遵循 Unix 语义的链接计数。
+     */
     inode_table[current_directory].link_count++;
     if (!write_inode_table()) {
         return 0;
@@ -917,6 +1086,7 @@ int simplefs_create(const char* name) {
     return 1;
 }
 
+/* 删除当前目录下的普通文件；如果文件仍然打开中则拒绝删除。 */
 int simplefs_delete(const char* name) {
     SimpleFsDirectoryEntry entry;
 
@@ -946,6 +1116,7 @@ int simplefs_delete(const char* name) {
     return write_inode_table();
 }
 
+/* 在当前目录下创建子目录，并自动初始化 "." / ".."。 */
 int simplefs_make_dir(const char* name) {
     uint32_t inode_index = 0;
 
@@ -970,6 +1141,7 @@ int simplefs_make_dir(const char* name) {
     return 1;
 }
 
+/* 删除当前目录下的空目录，根目录本身不能删。 */
 int simplefs_remove_dir(const char* name) {
     SimpleFsDirectoryEntry entry;
 
@@ -996,6 +1168,7 @@ int simplefs_remove_dir(const char* name) {
     return release_inode(entry.inode);
 }
 
+/* 切换当前工作目录，支持普通名字和根目录 "/"。 */
 int simplefs_change_dir(const char* name) {
     SimpleFsDirectoryEntry entry;
 
@@ -1019,6 +1192,7 @@ int simplefs_change_dir(const char* name) {
     return 1;
 }
 
+/* 按文件名把整个文件内容读出来。 */
 int simplefs_read_file(const char* name, uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_read_out) {
     SimpleFsDirectoryEntry entry;
 
@@ -1036,6 +1210,11 @@ int simplefs_read_file(const char* name, uint8_t* buffer, uint32_t buffer_size, 
     return read_inode_bytes(entry.inode, 0, buffer, buffer_size, bytes_read_out);
 }
 
+/*
+ * 覆盖写文件：
+ * - 文件不存在则自动创建
+ * - 文件存在则整个内容被替换
+ */
 int simplefs_write_file(const char* name, const uint8_t* data, uint32_t size) {
     SimpleFsDirectoryEntry entry;
 
@@ -1059,6 +1238,7 @@ int simplefs_write_file(const char* name, const uint8_t* data, uint32_t size) {
     return write_inode_data(entry.inode, data, size);
 }
 
+/* 追加写的实现比较直接：先整文件读出，再在末尾拼接，再整体重写。 */
 int simplefs_append_file(const char* name, const uint8_t* data, uint32_t size) {
     uint32_t old_size = 0;
 
@@ -1085,6 +1265,7 @@ int simplefs_append_file(const char* name, const uint8_t* data, uint32_t size) {
     return simplefs_write_file(name, file_scratch, old_size + size);
 }
 
+/* 打开当前目录下的普通文件，并在 open_files 表里分配一个 fd。 */
 int simplefs_open(const char* name) {
     SimpleFsDirectoryEntry entry;
 
@@ -1112,6 +1293,7 @@ int simplefs_open(const char* name) {
     return -1;
 }
 
+/* 关闭 fd，本质上只是清掉内存里的打开文件表项。 */
 int simplefs_close(int fd) {
     if (fd < 0 || fd >= SIMPLEFS_MAX_OPEN_FILES || !open_files[fd].used) {
         return 0;
@@ -1124,6 +1306,7 @@ int simplefs_close(int fd) {
     return 1;
 }
 
+/* 从 fd 当前偏移开始读取，并自动推进 offset。 */
 int simplefs_read_fd(int fd, uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_read_out) {
     uint32_t bytes_read = 0;
 
@@ -1145,6 +1328,10 @@ int simplefs_read_fd(int fd, uint8_t* buffer, uint32_t buffer_size, uint32_t* by
     return 1;
 }
 
+/*
+ * 从 fd 当前偏移写入。
+ * 当前实现同样走“整文件读出 -> 改内存缓冲区 -> 整体重写”的简单路线。
+ */
 int simplefs_write_fd(int fd, const uint8_t* data, uint32_t size) {
     uint32_t old_size = 0;
     uint32_t new_size;
@@ -1168,6 +1355,7 @@ int simplefs_write_fd(int fd, const uint8_t* data, uint32_t size) {
     }
 
     if (offset > old_size) {
+        /* 支持把偏移移动到文件尾之后再写，中间空洞补 0。 */
         for (uint32_t i = old_size; i < offset; i++) {
             file_scratch[i] = 0;
         }
@@ -1190,6 +1378,7 @@ int simplefs_write_fd(int fd, const uint8_t* data, uint32_t size) {
     return 1;
 }
 
+/* 调整 fd 的当前读写位置，但不允许越过文件当前大小。 */
 int simplefs_seek(int fd, uint32_t offset) {
     uint32_t inode_index;
 
@@ -1211,6 +1400,7 @@ int simplefs_seek(int fd, uint32_t offset) {
     return 1;
 }
 
+/* 打印当前已经打开的文件描述符表，便于 shell 中观察状态。 */
 void simplefs_print_open_files(void) {
     console_write_line("FD  OFFSET  NAME");
     for (int fd = 0; fd < SIMPLEFS_MAX_OPEN_FILES; fd++) {

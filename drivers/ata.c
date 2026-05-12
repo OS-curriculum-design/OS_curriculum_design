@@ -11,7 +11,7 @@
 /* IDE 主通道寄存器端口定义。 */
 #define ATA_DATA       0x1F0//读写数据
 #define ATA_ERROR      0x1F1//错误寄存器
-#define ATA_SECCOUNT   0x1F2//扇区数量寄存器
+#define ATA_SECCOUNT   0x1F2//扇区数量寄存器，表示要连续读写多少个扇区
 #define ATA_LBA_LOW    0x1F3
 #define ATA_LBA_MID    0x1F4
 #define ATA_LBA_HIGH   0x1F5//设三个放LBA地址低24位
@@ -21,15 +21,15 @@
 #define ATA_COMMAND    0x1F7//命令寄存器。端口号同上。写时是发命令，读时是看状态
 #define ATA_ALT_STATUS 0x3F6//备用状态寄存器，读它作为延时
 
-#define ATA_CMD_READ_SECTORS  0x20
-#define ATA_CMD_WRITE_SECTORS 0x30
-#define ATA_CMD_CACHE_FLUSH   0xE7
-
-#define ATA_STATUS_ERR  0x01
-#define ATA_STATUS_DRQ  0x08
-#define ATA_STATUS_DF   0x20
-#define ATA_STATUS_RDY  0x40
-#define ATA_STATUS_BSY  0x80
+#define ATA_CMD_READ_SECTORS  0x20//从磁盘拿到LBA的扇区数据
+#define ATA_CMD_WRITE_SECTORS 0x30//把数据写到磁盘的LBA扇区
+#define ATA_CMD_CACHE_FLUSH   0xE7//将控制器缓存刷新到磁盘
+//用来解析从状态寄存器读出的数据
+#define ATA_STATUS_ERR  0x01//出错
+#define ATA_STATUS_DRQ  0x08//数据缓冲区就绪，可以开始读写
+#define ATA_STATUS_DF   0x20//设备故障
+#define ATA_STATUS_RDY  0x40//设备准备好接收命令
+#define ATA_STATUS_BSY  0x80//设备忙
 
 /* 只有初始化成功后，读写接口才会真正工作。 */
 static int ata_ready = 0;
@@ -59,12 +59,12 @@ static int ata_wait_drq(void) {
     for (uint32_t i = 0; i < 100000U; i++) {
         uint8_t status = inb(ATA_STATUS);
 
-        if (status & (ATA_STATUS_ERR | ATA_STATUS_DF)) {
+        if (status & (ATA_STATUS_ERR | ATA_STATUS_DF)) {//ATA出错/设备故障
             (void)inb(ATA_ERROR);
             return 0;
         }
 
-        if (!(status & ATA_STATUS_BSY) && (status & ATA_STATUS_DRQ)) {
+        if (!(status & ATA_STATUS_BSY) && (status & ATA_STATUS_DRQ)) {//不忙且可以接受数据
             return 1;
         }
     }

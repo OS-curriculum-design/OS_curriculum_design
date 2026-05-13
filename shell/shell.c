@@ -439,9 +439,11 @@ static void print_help(void) {
     console_write_line("  installapps              write built-in .app files");
     console_write_line("  exec <file.app>          create READY process from SimpleFS");
     console_write_line("  execp <prio> <file.app>  create READY process with priority");
+    console_write_line("  spawn <ppid> <file.app>  create child process");
 
     console_write_line("Process:");
-    console_write_line("  ps sched reap");
+    console_write_line("  ps sched reap kill <pid>");
+    console_write_line("  wait <ppid> [pid]");
     console_write_line("  prio <pid> <prio>");
     console_write_line("  autosched [on|off]");
     console_write_line("  slice [ticks]");
@@ -760,6 +762,48 @@ static void run_command(const char* cmd) {
         return;
     }
 
+    // spawn <ppid> <file.app>：从 SimpleFS 读取 app，并把新进程挂到指定父 PID 下。
+    // 这里的父子关系用于教学观察，不复制父进程地址空间，也不是 Unix fork。
+    if (strncmp(cmd, "spawn ", 6) == 0) {
+        const char* args = cmd + 6;
+        const char* file_name;
+        uint32_t parent_pid = 0;
+        uint32_t image_size = 0;
+        int pid;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_leading_uint(&args, &parent_pid)) {
+                console_write_line("Usage: spawn <parent-pid> <file.app>");
+                return;
+            }
+
+            file_name = skip_spaces(args);
+            if (*file_name == '\0') {
+                console_write_line("Usage: spawn <parent-pid> <file.app>");
+                return;
+            }
+
+            if (!load_app_file(file_name, &image_size)) {
+                console_write_line("spawn failed: cannot read app.");
+                return;
+            }
+
+            pid = process_spawn_child_from_buffer((int)parent_pid, file_name, fs_command_buffer, image_size);
+            if (pid == 0) {
+                console_write_line("spawn failed: parent pid not found or process table is full.");
+                return;
+            }
+
+            console_write("created child pid=");
+            console_write_dec(pid);
+            console_write(" parent=");
+            console_write_dec((int)parent_pid);
+            console_put_char('\n');
+        }
+        return;
+    }
+
     // open <name> / close <fd> / fds：演示打开文件表。
     if (strncmp(cmd, "open ", 5) == 0) {
         int fd;
@@ -864,6 +908,68 @@ static void run_command(const char* cmd) {
     // ps：显示当前进程表。
     if (strcmp(cmd, "ps") == 0) {
         process_print_table();
+        return;
+    }
+
+    // wait <ppid> [pid]：由父进程领取一个已退出子进程的退出码并回收 PCB。
+    // Shell 版 wait 不阻塞；如果孩子还在 READY/RUNNING，就只打印提示。
+    if (strncmp(cmd, "wait ", 5) == 0) {
+        const char* args = cmd + 5;
+        uint32_t parent_pid = 0;
+        uint32_t child_pid = 0;
+        uint32_t exit_code = 0;
+        int waited_pid = 0;
+        int result;
+
+        if (!parse_leading_uint(&args, &parent_pid)) {
+            console_write_line("Usage: wait <parent-pid> [child-pid]");
+            return;
+        }
+
+        args = skip_spaces(args);
+        if (*args != '\0' && !parse_leading_uint(&args, &child_pid)) {
+            console_write_line("Usage: wait <parent-pid> [child-pid]");
+            return;
+        }
+
+        result = process_wait_child((int)parent_pid, (int)child_pid, &waited_pid, &exit_code);
+        if (result == PROCESS_WAIT_OK) {
+            console_write("waited child pid=");
+            console_write_dec(waited_pid);
+            console_write(" code=");
+            console_write_dec((int)exit_code);
+            console_put_char('\n');
+        } else if (result == PROCESS_WAIT_NOT_EXITED) {
+            console_write_line("wait: child has not exited.");
+        } else if (result == PROCESS_WAIT_BAD_PARENT) {
+            console_write_line("wait failed: parent pid not found.");
+        } else {
+            console_write_line("wait failed: no matching child.");
+        }
+        return;
+    }
+
+    // kill <pid>：撤销一个 READY/ZOMBIE 进程并释放它占用的 PCB 和地址空间。
+    // 如果被 kill 的进程还有孩子，孩子会在 process 层被收养到 parent_pid=0。
+    if (strncmp(cmd, "kill ", 5) == 0) {
+        uint32_t pid = 0;
+        int result;
+
+        if (!parse_uint(skip_spaces(cmd + 5), &pid)) {
+            console_write_line("Usage: kill <pid>");
+            return;
+        }
+
+        result = process_kill((int)pid);
+        if (result == PROCESS_KILL_OK) {
+            console_write("killed process pid=");
+            console_write_dec((int)pid);
+            console_put_char('\n');
+        } else if (result == PROCESS_KILL_RUNNING) {
+            console_write_line("kill failed: process is running.");
+        } else {
+            console_write_line("kill failed: pid not found.");
+        }
         return;
     }
 

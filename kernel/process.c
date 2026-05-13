@@ -36,6 +36,8 @@
 typedef struct {
     int used;
     int pid;
+    /* 父进程 PID；0 表示由内核/Shell 托管，或父进程已退出后被收养。 */
+    int parent_pid;
     ProcessState state;
     int priority;
     const char* name;
@@ -88,6 +90,7 @@ static Process* allocate_process(void) {
             /* 把一项空槽初始化成 READY 状态的最小进程骨架。 */
             processes[i].used = 1;
             processes[i].pid = next_pid++;
+            processes[i].parent_pid = 0;
             processes[i].state = PROCESS_READY;
             processes[i].priority = PROCESS_PRIORITY_DEFAULT;
             processes[i].name = "";
@@ -106,12 +109,42 @@ static Process* allocate_process(void) {
     return (Process*)0;
 }
 
-int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* image, uint32_t image_size, int priority) {
+static int parent_pid_is_valid(int parent_pid) {
+    Process* parent;
+
+    /* parent_pid=0 是保留的“根父进程”，用于 Shell 直接创建和孤儿进程收养。 */
+    if (parent_pid == 0) {
+        return 1;
+    }
+
+    parent = find_process_by_pid(parent_pid);
+    return parent != (Process*)0 && parent->state != PROCESS_ZOMBIE;
+}
+
+static void adopt_children(int parent_pid) {
+    /*
+     * 父进程退出、被 wait 回收或被 kill 时，不能让孩子继续指向失效 PID。
+     * 这里采用最小实现：所有孩子转交给 parent_pid=0，由 reap 负责后续清理。
+     */
+    if (parent_pid == 0) {
+        return;
+    }
+
+    for (int i = 0; i < PROCESS_MAX; i++) {
+        if (processes[i].used && processes[i].parent_pid == parent_pid) {
+            processes[i].parent_pid = 0;
+        }
+    }
+}
+
+int process_spawn_child_from_buffer_with_priority(int parent_pid, const char* name, const uint8_t* image, uint32_t image_size, int priority) {
     Process* process;
 
+    /* 创建子进程时先确认父进程存在；普通 exec 会走 parent_pid=0 的兼容路径。 */
     if (image == (const uint8_t*)0 ||
         image_size == 0 ||
         image_size > PROCESS_IMAGE_MAX ||
+        !parent_pid_is_valid(parent_pid) ||
         priority < PROCESS_PRIORITY_MIN ||
         priority > PROCESS_PRIORITY_MAX) {
         return 0;
@@ -123,6 +156,7 @@ int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* ima
     }
 
     process->name = name;
+    process->parent_pid = parent_pid;
     process->priority = priority;
     process->image_size = image_size;
     if (!vmm_create_address_space(&process->page_directory_phys)) {
@@ -163,6 +197,15 @@ int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* ima
     pager_pin_page_in_directory(process->page_directory_phys, PROCESS_USER_STACK_PAGE, 1);
 
     return process->pid;
+}
+
+int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* image, uint32_t image_size, int priority) {
+    /* 旧接口保持不变：Shell 直接 exec 出来的进程统一挂在 parent_pid=0 下。 */
+    return process_spawn_child_from_buffer_with_priority(0, name, image, image_size, priority);
+}
+
+int process_spawn_child_from_buffer(int parent_pid, const char* name, const uint8_t* image, uint32_t image_size) {
+    return process_spawn_child_from_buffer_with_priority(parent_pid, name, image, image_size, PROCESS_PRIORITY_DEFAULT);
 }
 
 int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
@@ -602,6 +645,8 @@ static int process_run(int pid) {
     } else {
         process->exit_code = result;
         process->state = PROCESS_ZOMBIE;
+        /* 当前没有阻塞式 wait；父进程结束时，先把仍存活的孩子交给 0 号父进程托管。 */
+        adopt_children(process->pid);
     }
 
     current_pid = 0;
@@ -612,6 +657,9 @@ static void release_process(Process* process) {
     if (process == (Process*)0 || !process->used || process->state == PROCESS_RUNNING) {
         return;
     }
+
+    /* 释放 PCB 前先处理父子关系，避免子进程留下悬空的 parent_pid。 */
+    adopt_children(process->pid);
 
     if (process->page_directory_phys != 0) {
         memdemo_release_for_directory(process->page_directory_phys);
@@ -629,6 +677,7 @@ static void release_process(Process* process) {
 
     process->used = 0;
     process->pid = 0;
+    process->parent_pid = 0;
     process->state = PROCESS_UNUSED;
     process->priority = PROCESS_PRIORITY_DEFAULT;
     process->name = "";
@@ -644,6 +693,7 @@ void process_init(void) {
     for (int i = 0; i < PROCESS_MAX; i++) {
         processes[i].used = 0;
         processes[i].pid = 0;
+        processes[i].parent_pid = 0;
         processes[i].state = PROCESS_UNUSED;
         processes[i].priority = PROCESS_PRIORITY_DEFAULT;
         processes[i].vm_page_bitmap = 0;
@@ -857,6 +907,68 @@ int process_get_priority(int pid, int* priority_out) {
     return 1;
 }
 
+int process_wait_child(int parent_pid, int child_pid, int* waited_pid_out, uint32_t* exit_code_out) {
+    Process* selected = (Process*)0;
+    int has_child = 0;
+
+    /*
+     * Shell 不是普通用户进程，因此这里实现成“非阻塞 wait”：
+     * 只有匹配的子进程已经 ZOMBIE 时才回收，否则返回 NOT_EXITED。
+     */
+    if (parent_pid != 0 && find_process_by_pid(parent_pid) == (Process*)0) {
+        return PROCESS_WAIT_BAD_PARENT;
+    }
+
+    for (int i = 0; i < PROCESS_MAX; i++) {
+        if (!processes[i].used || processes[i].parent_pid != parent_pid) {
+            continue;
+        }
+
+        if (child_pid != 0 && processes[i].pid != child_pid) {
+            continue;
+        }
+
+        has_child = 1;
+        if (processes[i].state == PROCESS_ZOMBIE) {
+            selected = &processes[i];
+            break;
+        }
+    }
+
+    if (selected == (Process*)0) {
+        /* 有孩子但还没退出，和根本没有匹配孩子，要给 Shell 不同提示。 */
+        return has_child ? PROCESS_WAIT_NOT_EXITED : PROCESS_WAIT_NO_CHILD;
+    }
+
+    if (waited_pid_out != (int*)0) {
+        *waited_pid_out = selected->pid;
+    }
+
+    if (exit_code_out != (uint32_t*)0) {
+        *exit_code_out = selected->exit_code;
+    }
+
+    release_process(selected);
+    return PROCESS_WAIT_OK;
+}
+
+int process_kill(int pid) {
+    Process* process = find_process_by_pid(pid);
+
+    if (process == (Process*)0) {
+        return PROCESS_KILL_NOT_FOUND;
+    }
+
+    if (process->state == PROCESS_RUNNING) {
+        /* 当前调度器没有异步中止 RUNNING 上下文的机制，先只支持撤销非运行态进程。 */
+        return PROCESS_KILL_RUNNING;
+    }
+
+    /* READY/ZOMBIE 都可以直接释放；若目标有孩子，release_process 会完成收养。 */
+    release_process(process);
+    return PROCESS_KILL_OK;
+}
+
 int process_auto_schedule_enabled(void) {
     return auto_schedule_enabled;
 }
@@ -868,9 +980,9 @@ void process_set_auto_schedule(int enabled) {
 int process_reap_zombies(void) {
     int reaped = 0;
 
-    /* 把所有已经 exit 的进程统一回收掉。 */
+    /* 只回收 parent_pid=0 的僵尸；普通子进程需要由父进程通过 wait 领取退出码。 */
     for (int i = 0; i < PROCESS_MAX; i++) {
-        if (processes[i].used && processes[i].state == PROCESS_ZOMBIE) {
+        if (processes[i].used && processes[i].state == PROCESS_ZOMBIE && processes[i].parent_pid == 0) {
             release_process(&processes[i]);
             reaped++;
         }
@@ -880,7 +992,7 @@ int process_reap_zombies(void) {
 }
 
 void process_print_table(void) {
-    console_write_line("PID  PRI  STATE    NAME");
+    console_write_line("PID  PPID  PRI  STATE    NAME");
 
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (!processes[i].used) {
@@ -889,6 +1001,8 @@ void process_print_table(void) {
 
         console_write_dec(processes[i].pid);
         console_write("    ");
+        console_write_dec(processes[i].parent_pid);
+        console_write("     ");
         console_write_dec(processes[i].priority);
         console_write("    ");
 
@@ -896,6 +1010,8 @@ void process_print_table(void) {
             console_write("READY    ");
         } else if (processes[i].state == PROCESS_RUNNING) {
             console_write("RUNNING  ");
+        } else if (processes[i].state == PROCESS_WAITING) {
+            console_write("WAITING  ");
         } else if (processes[i].state == PROCESS_ZOMBIE) {
             console_write("ZOMBIE   ");
         } else {

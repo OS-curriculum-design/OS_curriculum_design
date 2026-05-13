@@ -4,7 +4,7 @@
  * 设计目标是用尽量少的代码演示“按需调页 + 页面换出”：
  * - 注册页时先不给物理页，只在交换区预留槽位
  * - 页面第一次访问触发 #PF，再换入内存
- * - 物理页框满时，用二次机会 / clock 算法挑选牺牲页
+ * - 物理页框满时，可用 clock 或采样式 LRU 挑选牺牲页
  */
 #include "pager.h"
 
@@ -16,6 +16,7 @@
 /* 交换区直接放在磁盘固定 LBA 区域上。 */
 #define PAGER_SWAP_LBA_BASE 2048U
 #define PAGER_SECTORS_PER_PAGE (PAGE_SIZE / ATA_SECTOR_SIZE)
+#define PAGER_VICTIM_TRACE_COUNT 8U
 
 /* 每个逻辑页对应一个状态项。 */
 typedef struct {
@@ -27,6 +28,8 @@ typedef struct {
     uint32_t phys_addr;
     uint32_t flags;
     uint32_t swap_slot;
+    uint32_t last_used_tick;
+    int pinned;
 } PagerPage;
 
 static PagerPage pager_pages[PAGER_MAX_PAGES];
@@ -34,6 +37,8 @@ static PagerPage pager_pages[PAGER_MAX_PAGES];
 static uint32_t frame_pages[PAGER_FRAME_LIMIT];
 /* 新注册页的初始内容统一为全 0。 */
 static uint8_t zero_page[PAGE_SIZE];
+/* 避免在 ring3 缺页/系统调用路径上使用 4KiB 内核栈空间。 */
+static uint8_t scratch_page[PAGE_SIZE];
 
 static uint32_t registered_pages = 0;
 static uint32_t resident_frames = 0;
@@ -43,6 +48,10 @@ static uint32_t evictions = 0;
 static uint32_t swap_ins = 0;
 static uint32_t swap_outs = 0;
 static uint32_t last_fault_addr = 0;
+static uint32_t usage_tick = 0;
+static uint32_t victim_trace[PAGER_VICTIM_TRACE_COUNT];
+static uint32_t victim_trace_count = 0;
+static PagerAlgorithm current_algorithm = PAGER_ALGORITHM_CLOCK;
 static int pager_ready = 0;
 
 static uint32_t align_down_page(uint32_t value) {
@@ -60,6 +69,21 @@ static int swap_write_slot(uint32_t slot, const void* buffer) {
 
 static int swap_read_slot(uint32_t slot, void* buffer) {
     return ata_read_sectors(swap_lba_for_slot(slot), (uint8_t)PAGER_SECTORS_PER_PAGE, buffer);
+}
+
+static int write_page_data_to_swap(uint32_t swap_slot, const uint8_t* data, uint32_t data_size) {
+    if (data == (const uint8_t*)0) {
+        return swap_write_slot(swap_slot, zero_page);
+    }
+
+    for (uint32_t i = 0; i < PAGE_SIZE; i++) {
+        scratch_page[i] = 0;
+    }
+    for (uint32_t i = 0; i < data_size; i++) {
+        scratch_page[i] = data[i];
+    }
+
+    return swap_write_slot(swap_slot, scratch_page);
 }
 
 static int find_page_by_virt(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t* page_index_out) {
@@ -103,20 +127,96 @@ static int page_was_accessed(uint32_t page_index) {
     return (entry & VMM_PAGE_ACCESSED) != 0;
 }
 
-static uint32_t choose_victim_frame(void) {
+static void mark_page_used(uint32_t page_index) {
+    usage_tick++;
+    if (usage_tick == 0) {
+        usage_tick = 1;
+    }
+    pager_pages[page_index].last_used_tick = usage_tick;
+}
+
+static void sample_page_usage(uint32_t page_index) {
+    if (page_was_accessed(page_index)) {
+        mark_page_used(page_index);
+        vmm_clear_page_accessed_in_directory(pager_pages[page_index].page_directory_phys,
+                                             pager_pages[page_index].virt_addr);
+    }
+}
+
+static void record_victim(uint32_t virt_addr) {
+    if (victim_trace_count < PAGER_VICTIM_TRACE_COUNT) {
+        victim_trace[victim_trace_count++] = virt_addr;
+        return;
+    }
+
+    for (uint32_t i = 1; i < PAGER_VICTIM_TRACE_COUNT; i++) {
+        victim_trace[i - 1U] = victim_trace[i];
+    }
+    victim_trace[PAGER_VICTIM_TRACE_COUNT - 1U] = virt_addr;
+}
+
+static uint32_t choose_clock_victim_frame(void) {
+    uint32_t scanned = 0;
+
     while (1) {
         uint32_t page_index = frame_pages[clock_hand];
+
+        if (pager_pages[page_index].pinned) {
+            clock_hand = (clock_hand + 1U) % PAGER_FRAME_LIMIT;
+            scanned++;
+            if (scanned >= PAGER_FRAME_LIMIT * 2U) {
+                return clock_hand;
+            }
+            continue;
+        }
 
         /* 给最近访问过的页一次“第二次机会”，清掉 accessed 后跳过它。 */
         if (page_was_accessed(page_index)) {
             vmm_clear_page_accessed_in_directory(pager_pages[page_index].page_directory_phys,
                                                  pager_pages[page_index].virt_addr);
             clock_hand = (clock_hand + 1U) % PAGER_FRAME_LIMIT;
+            scanned++;
+            if (scanned >= PAGER_FRAME_LIMIT * 2U) {
+                return clock_hand;
+            }
             continue;
         }
 
         return clock_hand;
     }
+}
+
+static uint32_t choose_lru_victim_frame(void) {
+    uint32_t best_slot = 0;
+    uint32_t best_tick = 0xFFFFFFFFU;
+    int found = 0;
+
+    for (uint32_t slot = 0; slot < resident_frames; slot++) {
+        uint32_t page_index = frame_pages[slot];
+        uint32_t used_tick;
+
+        if (pager_pages[page_index].pinned) {
+            continue;
+        }
+
+        sample_page_usage(page_index);
+        used_tick = pager_pages[page_index].last_used_tick;
+        if (!found || used_tick < best_tick) {
+            best_tick = used_tick;
+            best_slot = slot;
+            found = 1;
+        }
+    }
+
+    return best_slot;
+}
+
+static uint32_t choose_victim_frame(void) {
+    if (current_algorithm == PAGER_ALGORITHM_LRU) {
+        return choose_lru_victim_frame();
+    }
+
+    return choose_clock_victim_frame();
 }
 
 static int evict_frame(uint32_t frame_slot) {
@@ -135,6 +235,7 @@ static int evict_frame(uint32_t frame_slot) {
     victim->phys_addr = 0;
     victim->present = 0;
     victim->swapped = 1;
+    record_victim(victim->virt_addr);
 
     evictions++;
     swap_outs++;
@@ -183,6 +284,7 @@ static int page_in(uint32_t page_index) {
     page->phys_addr = phys_addr;
     page->present = 1;
     page->swapped = 0;
+    mark_page_used(page_index);
     swap_ins++;
     return 1;
 }
@@ -203,6 +305,8 @@ int pager_init(void) {
         pager_pages[i].phys_addr = 0;
         pager_pages[i].flags = 0;
         pager_pages[i].swap_slot = i;
+        pager_pages[i].last_used_tick = 0;
+        pager_pages[i].pinned = 0;
     }
 
     for (uint32_t i = 0; i < PAGE_SIZE; i++) {
@@ -217,6 +321,9 @@ int pager_init(void) {
     swap_ins = 0;
     swap_outs = 0;
     last_fault_addr = 0;
+    usage_tick = 0;
+    victim_trace_count = 0;
+    current_algorithm = PAGER_ALGORITHM_CLOCK;
     pager_ready = 1;
     return 1;
 }
@@ -225,10 +332,43 @@ int pager_is_ready(void) {
     return pager_ready;
 }
 
+PagerAlgorithm pager_get_algorithm(void) {
+    return current_algorithm;
+}
+
+int pager_set_algorithm(PagerAlgorithm algorithm) {
+    if (algorithm != PAGER_ALGORITHM_CLOCK && algorithm != PAGER_ALGORITHM_LRU) {
+        return 0;
+    }
+
+    current_algorithm = algorithm;
+    return 1;
+}
+
+const char* pager_algorithm_name(PagerAlgorithm algorithm) {
+    if (algorithm == PAGER_ALGORITHM_LRU) {
+        return "lru";
+    }
+    return "clock";
+}
+
+void pager_sample_usage(void) {
+    if (!pager_ready) {
+        return;
+    }
+
+    for (uint32_t slot = 0; slot < resident_frames; slot++) {
+        sample_page_usage(frame_pages[slot]);
+    }
+}
+
+void pager_clear_victim_trace(void) {
+    victim_trace_count = 0;
+}
+
 int pager_register_page_data(uint32_t page_directory_phys, uint32_t virt_addr, uint32_t flags, const uint8_t* data, uint32_t data_size) {
     uint32_t page_index;
     uint32_t page_addr;
-    uint8_t page_buffer[PAGE_SIZE];
 
     if (!pager_ready ||
         page_directory_phys == 0 ||
@@ -242,15 +382,7 @@ int pager_register_page_data(uint32_t page_directory_phys, uint32_t virt_addr, u
     if (find_page_by_virt(page_directory_phys, virt_addr, &page_index)) {
         pager_pages[page_index].flags = flags;
         if (data != (const uint8_t*)0 || data_size == 0) {
-            for (uint32_t i = 0; i < PAGE_SIZE; i++) {
-                page_buffer[i] = 0;
-            }
-            if (data != (const uint8_t*)0) {
-                for (uint32_t i = 0; i < data_size; i++) {
-                    page_buffer[i] = data[i];
-                }
-            }
-            if (!swap_write_slot(pager_pages[page_index].swap_slot, page_buffer)) {
+            if (!write_page_data_to_swap(pager_pages[page_index].swap_slot, data, data_size)) {
                 return 0;
             }
         }
@@ -263,16 +395,7 @@ int pager_register_page_data(uint32_t page_directory_phys, uint32_t virt_addr, u
 
     page_addr = align_down_page(virt_addr);
     /* 把“该页还未被真正写过”的初始内容视作一页全 0 数据。 */
-    for (uint32_t i = 0; i < PAGE_SIZE; i++) {
-        page_buffer[i] = 0;
-    }
-    if (data != (const uint8_t*)0) {
-        for (uint32_t i = 0; i < data_size; i++) {
-            page_buffer[i] = data[i];
-        }
-    }
-
-    if (!swap_write_slot(pager_pages[page_index].swap_slot, page_buffer)) {
+    if (!write_page_data_to_swap(pager_pages[page_index].swap_slot, data, data_size)) {
         return 0;
     }
 
@@ -283,6 +406,8 @@ int pager_register_page_data(uint32_t page_directory_phys, uint32_t virt_addr, u
     pager_pages[page_index].virt_addr = page_addr;
     pager_pages[page_index].phys_addr = 0;
     pager_pages[page_index].flags = flags;
+    pager_pages[page_index].last_used_tick = 0;
+    pager_pages[page_index].pinned = 0;
 
     registered_pages++;
     return 1;
@@ -294,6 +419,21 @@ int pager_register_page_in_directory(uint32_t page_directory_phys, uint32_t virt
 
 int pager_register_page(uint32_t virt_addr, uint32_t flags) {
     return pager_register_page_in_directory(vmm_get_page_directory(), virt_addr, flags);
+}
+
+int pager_pin_page_in_directory(uint32_t page_directory_phys, uint32_t virt_addr, int pinned) {
+    uint32_t page_index;
+
+    if (!pager_ready || page_directory_phys == 0) {
+        return 0;
+    }
+
+    if (!find_page_by_virt(page_directory_phys, virt_addr, &page_index)) {
+        return 0;
+    }
+
+    pager_pages[page_index].pinned = pinned ? 1 : 0;
+    return 1;
 }
 
 void pager_unregister_page(uint32_t page_directory_phys, uint32_t virt_addr) {
@@ -332,6 +472,8 @@ void pager_unregister_page(uint32_t page_directory_phys, uint32_t virt_addr) {
     pager_pages[page_index].virt_addr = 0;
     pager_pages[page_index].phys_addr = 0;
     pager_pages[page_index].flags = 0;
+    pager_pages[page_index].last_used_tick = 0;
+    pager_pages[page_index].pinned = 0;
 
     if (registered_pages > 0) {
         registered_pages--;
@@ -363,6 +505,9 @@ void pager_print_stats(void) {
     console_write("pager: ");
     console_write_line(pager_ready ? "ready" : "not ready");
 
+    console_write("algorithm: ");
+    console_write_line(pager_algorithm_name(current_algorithm));
+
     console_write("registered pages: ");
     console_write_dec((int)registered_pages);
     console_put_char('\n');
@@ -390,4 +535,17 @@ void pager_print_stats(void) {
     console_write("/");
     console_write_dec((int)swap_outs);
     console_put_char('\n');
+
+    console_write("victim trace: ");
+    if (victim_trace_count == 0) {
+        console_write_line("none");
+    } else {
+        for (uint32_t i = 0; i < victim_trace_count; i++) {
+            if (i > 0) {
+                console_write(" ");
+            }
+            console_write_hex(victim_trace[i]);
+        }
+        console_put_char('\n');
+    }
 }

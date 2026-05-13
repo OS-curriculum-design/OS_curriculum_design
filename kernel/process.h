@@ -26,8 +26,10 @@ void process_init(void);
 int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size);
 /* 以指定优先级创建进程，priority 取值范围为 0..10。 */
 int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* image, uint32_t image_size, int priority);
-/* 把 hello / counter / busy 构造成可执行镜像。 */
+/* 把内建用户程序构造成可执行镜像。 */
 int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out);
+/* 为当前用户进程登记一个按需换入的数据页，返回用户虚拟地址。 */
+uint32_t process_vm_alloc_page(uint32_t page_index);
 /* 立即运行一个已创建的 READY 进程。 */
 int process_run_pid(int pid);
 /* 调度一个 READY 进程运行。 */

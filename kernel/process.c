@@ -27,6 +27,8 @@
 #define PROCESS_USER_CODE_BASE  0x00800000U
 #define PROCESS_USER_STACK_TOP  0xBFFF0000U
 #define PROCESS_USER_STACK_PAGE (PROCESS_USER_STACK_TOP - PAGE_SIZE)
+#define PROCESS_USER_VM_BASE    0x03000000U
+#define PROCESS_USER_VM_PAGE_COUNT 24U
 #define PROCESS_PRIORITY_DEFAULT 5
 #define PROCESS_PRIORITY_MIN 0
 #define PROCESS_PRIORITY_MAX 10
@@ -39,6 +41,7 @@ typedef struct {
     const char* name;
     UserContext context;
     uint32_t page_directory_phys;
+    uint32_t vm_page_bitmap;
     uint32_t exit_code;
     uint32_t image_size;
 } Process;
@@ -93,6 +96,7 @@ static Process* allocate_process(void) {
             processes[i].context.user_esp = PROCESS_USER_STACK_TOP;
             processes[i].context.eflags = 0x202U;
             processes[i].page_directory_phys = 0;
+            processes[i].vm_page_bitmap = 0;
             processes[i].exit_code = 0;
             processes[i].image_size = 0;
             return &processes[i];
@@ -141,6 +145,7 @@ int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* ima
         process->state = PROCESS_UNUSED;
         return 0;
     }
+    pager_pin_page_in_directory(process->page_directory_phys, PROCESS_USER_CODE_BASE, 1);
 
     /*
      * 栈页同样延迟分配。iret 只加载 ESP，真正读写栈时才会触发 #PF。
@@ -155,12 +160,43 @@ int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* ima
         process->state = PROCESS_UNUSED;
         return 0;
     }
+    pager_pin_page_in_directory(process->page_directory_phys, PROCESS_USER_STACK_PAGE, 1);
 
     return process->pid;
 }
 
 int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
     return process_spawn_from_buffer_with_priority(name, image, image_size, PROCESS_PRIORITY_DEFAULT);
+}
+
+uint32_t process_vm_alloc_page(uint32_t page_index) {
+    Process* process;
+    uint32_t virt_addr;
+    uint32_t bit;
+
+    if (current_pid == 0 || page_index >= PROCESS_USER_VM_PAGE_COUNT) {
+        return 0;
+    }
+
+    process = find_process_by_pid(current_pid);
+    if (process == (Process*)0 || process->state != PROCESS_RUNNING) {
+        return 0;
+    }
+
+    virt_addr = PROCESS_USER_VM_BASE + page_index * PAGE_SIZE;
+    bit = 1U << page_index;
+    if ((process->vm_page_bitmap & bit) != 0) {
+        return virt_addr;
+    }
+
+    if (!pager_register_page_in_directory(process->page_directory_phys,
+                                          virt_addr,
+                                          VMM_PAGE_WRITABLE | VMM_PAGE_USER)) {
+        return 0;
+    }
+
+    process->vm_page_bitmap |= bit;
+    return virt_addr;
 }
 
 static uint32_t build_hello_image(uint8_t* image) {
@@ -322,6 +358,29 @@ static void emit_memdemo_reset(uint8_t* image, uint32_t* offset) {
     emit_u8(image, offset, 0x80);
 }
 
+static void emit_vm_alloc(uint8_t* image, uint32_t* offset, uint32_t page) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_VM_ALLOC */
+    emit_u32(image, offset, SYS_VM_ALLOC);
+    emit_u8(image, offset, 0xBB); /* mov ebx, page */
+    emit_u32(image, offset, page);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
+static void emit_vm_sample(uint8_t* image, uint32_t* offset) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_VM_SAMPLE */
+    emit_u32(image, offset, SYS_VM_SAMPLE);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
+static void emit_pager_trace_reset(uint8_t* image, uint32_t* offset) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_PAGER_TRACE_RESET */
+    emit_u32(image, offset, SYS_PAGER_TRACE_RESET);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
 static void emit_rel32(uint8_t* image, uint32_t patch_offset, int32_t rel) {
     image[patch_offset] = (uint8_t)(rel & 0xFF);
     image[patch_offset + 1U] = (uint8_t)((rel >> 8) & 0xFF);
@@ -464,6 +523,60 @@ static uint32_t build_memtrack_image(uint8_t* image) {
     return offset;
 }
 
+static uint32_t build_pagerdemo_image(uint8_t* image) {
+    static const char start_msg[] = "pagerdemo: user process starts\n";
+    static const char done_msg[] = "pagerdemo: done, run pager to inspect victim trace\n";
+    uint32_t offset = 0;
+    uint32_t start_patch;
+    uint32_t done_patch;
+    uint32_t start_len;
+    uint32_t done_len;
+    uint32_t start_msg_offset;
+    uint32_t done_msg_offset;
+
+    memset(image, 0, PROCESS_IMAGE_MAX);
+
+    emit_write_string(image, &offset, start_msg, &start_patch, &start_len);
+    emit_pager_trace_reset(image, &offset);
+
+    for (uint32_t i = 0; i <= PAGER_FRAME_LIMIT; i++) {
+        emit_vm_alloc(image, &offset, i);
+    }
+
+    for (uint32_t i = 0; i < PAGER_FRAME_LIMIT - 1U; i++) {
+        emit_vm_alloc(image, &offset, i);
+        emit_user_write_eax(image, &offset, 0xD0A00000U | i);
+    }
+
+    emit_vm_sample(image, &offset);
+
+    emit_vm_alloc(image, &offset, 0);
+    emit_user_write_eax(image, &offset, 0xD0A01000U);
+
+    emit_vm_alloc(image, &offset, PAGER_FRAME_LIMIT - 1U);
+    emit_user_write_eax(image, &offset, 0xD0A02000U | (PAGER_FRAME_LIMIT - 1U));
+
+    emit_vm_alloc(image, &offset, PAGER_FRAME_LIMIT);
+    emit_user_write_eax(image, &offset, 0xD0A03000U | PAGER_FRAME_LIMIT);
+
+    emit_write_string(image, &offset, done_msg, &done_patch, &done_len);
+    emit_exit(image, &offset, 0);
+
+    start_msg_offset = offset;
+    for (uint32_t i = 0; i < start_len; i++) {
+        image[offset++] = (uint8_t)start_msg[i];
+    }
+
+    done_msg_offset = offset;
+    for (uint32_t i = 0; i < done_len; i++) {
+        image[offset++] = (uint8_t)done_msg[i];
+    }
+
+    patch_message_address(image, start_patch, start_msg_offset);
+    patch_message_address(image, done_patch, done_msg_offset);
+    return offset;
+}
+
 static int process_run(int pid) {
     Process* process = find_process_by_pid(pid);
     uint32_t result;
@@ -505,6 +618,12 @@ static void release_process(Process* process) {
         /* Pager 会处理“已换入”和“仍在交换区”的两种页状态。 */
         pager_unregister_page(process->page_directory_phys, PROCESS_USER_CODE_BASE);
         pager_unregister_page(process->page_directory_phys, PROCESS_USER_STACK_PAGE);
+        for (uint32_t i = 0; i < PROCESS_USER_VM_PAGE_COUNT; i++) {
+            if ((process->vm_page_bitmap & (1U << i)) != 0) {
+                pager_unregister_page(process->page_directory_phys,
+                                      PROCESS_USER_VM_BASE + i * PAGE_SIZE);
+            }
+        }
         vmm_destroy_address_space(process->page_directory_phys);
     }
 
@@ -515,6 +634,7 @@ static void release_process(Process* process) {
     process->name = "";
     memset(&process->context, 0, sizeof(UserContext));
     process->page_directory_phys = 0;
+    process->vm_page_bitmap = 0;
     process->exit_code = 0;
     process->image_size = 0;
 }
@@ -526,6 +646,7 @@ void process_init(void) {
         processes[i].pid = 0;
         processes[i].state = PROCESS_UNUSED;
         processes[i].priority = PROCESS_PRIORITY_DEFAULT;
+        processes[i].vm_page_bitmap = 0;
     }
 
     next_pid = 1;
@@ -551,6 +672,8 @@ int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image
         image_size = build_memalloc_image(image);
     } else if (strcmp(name, "memtrack") == 0) {
         image_size = build_memtrack_image(image);
+    } else if (strcmp(name, "pagerdemo") == 0) {
+        image_size = build_pagerdemo_image(image);
     } else {
         return 0;
     }

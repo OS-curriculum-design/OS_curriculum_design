@@ -9,8 +9,12 @@ mem：显示物理内存、页大小、分页和映射状态
 uservm：显示用户态虚拟地址空间示例
 ring3：运行 ring3 用户态演示
 pager：显示分页器统计信息
+pageralgo：显示当前页面置换算法
+pageralgo clock：切换为 Clock 页面置换算法
+pageralgo lru：切换为 LRU 页面置换算法
 pagertest：触发真实 #PF 分页换入/换出测试
 memdemo：创建真实内存分配进程和内存跟踪进程，输出并记录内存活动
+pagerdemo.app：真实用户态页面置换演示程序，运行中申请按需分页数据页并触发 #PF
 
 进程类
 
@@ -68,6 +72,7 @@ counter.app：分三步输出 counter step，每步后主动 yield
 busy.app：分三步输出 busy step，中间忙等，适合测试抢占调度
 memalloc.app：调用 PMM/VMM 分配真实物理页，并在用户态写入映射页
 memtrack.app：同步等待真实内存操作，打印状态并写入 memdemo.log
+pagerdemo.app：用户态申请 pager 管理的数据页，访问时触发真实缺页中断和页面置换
 
 常见用法示例
 
@@ -85,7 +90,15 @@ prio 1 8
 reap
 mem
 pager
+pageralgo
+pageralgo clock
 pagertest
+pageralgo lru
+pagertest
+exec pagerdemo.app
+sched
+pager
+reap
 memdemo
 cat memdemo.log
 mkdir test
@@ -113,6 +126,10 @@ make clean：清理构建产物
 当前 Shell 不支持 edit <file> <text>，可使用 write <file> <text> 代替
 当前 Shell 不支持引号、管道、重定向和后台任务
 当前页大小为 4KiB
+页面置换演示推荐顺序：pageralgo，pageralgo clock，pagertest，pageralgo lru，pagertest
+pagertest 使用真实 #PF 和 swap 路径，对比 Clock 与 LRU 的 victim trace
+真实用户进程置换演示：pageralgo clock 或 pageralgo lru，exec pagerdemo.app，sched，pager，reap
+pagerdemo.app 运行在 ring3，先通过 syscall 登记用户数据页，真正写入时由 #PF 进入 pager
 memdemo 使用真实 PMM/VMM 页，单页大小为 4KiB，演示槽位为 8 页
 SimpleFS 单文件最大 68608 字节
 最多同时打开 8 个文件描述符

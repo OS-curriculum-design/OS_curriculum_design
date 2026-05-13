@@ -26,7 +26,8 @@
 // 因此用户实际最多只能输入 127 个可见字符。
 #define INPUT_MAX 128
 #define PAGER_TEST_BASE 0x40000000U
-#define PAGER_TEST_PAGE_COUNT 20U
+#define PAGER_TEST_PAGE_COUNT (PAGER_FRAME_LIMIT + 1U)
+#define PAGER_TEST_CLEAN_PAGE_COUNT 20U
 #define BIGFILE_TEST_NAME "bigfile.test"
 
 // 保存用户当前正在输入的一整行命令。
@@ -50,7 +51,14 @@ static void run_pager_fault_test(void) {
         return;
     }
 
+    for (uint32_t i = 0; i < PAGER_TEST_CLEAN_PAGE_COUNT; i++) {
+        pager_unregister_page(vmm_get_page_directory(), PAGER_TEST_BASE + i * PAGE_SIZE);
+    }
+    pager_clear_victim_trace();
+
     console_write_line("Pager fault test using real #PF");
+    console_write("algorithm: ");
+    console_write_line(pager_algorithm_name(pager_get_algorithm()));
     for (uint32_t i = 0; i < PAGER_TEST_PAGE_COUNT; i++) {
         if (!pager_register_page(PAGER_TEST_BASE + i * PAGE_SIZE, VMM_PAGE_WRITABLE)) {
             console_write_line("pager test: register failed");
@@ -58,16 +66,23 @@ static void run_pager_fault_test(void) {
         }
     }
 
-    console_write_line("access pattern: pages 0..19, then 0..3");
+    console_write_line("access pattern: fill 0..15, sample if LRU, touch 0, then 16");
 
-    for (uint32_t i = 0; i < PAGER_TEST_PAGE_COUNT; i++) {
+    for (uint32_t i = 0; i < PAGER_FRAME_LIMIT; i++) {
         uint32_t* ptr = (uint32_t*)(PAGER_TEST_BASE + i * PAGE_SIZE);
         *ptr = 0xC1000000U | i;
     }
 
-    for (uint32_t i = 0; i < 4U; i++) {
-        uint32_t* ptr = (uint32_t*)(PAGER_TEST_BASE + i * PAGE_SIZE);
-        *ptr = 0xC1001000U | i;
+    if (pager_get_algorithm() == PAGER_ALGORITHM_LRU) {
+        pager_sample_usage();
+    }
+
+    {
+        uint32_t* hot_ptr = (uint32_t*)PAGER_TEST_BASE;
+        uint32_t* new_ptr = (uint32_t*)(PAGER_TEST_BASE + PAGER_FRAME_LIMIT * PAGE_SIZE);
+
+        *hot_ptr = 0xC1001000U;
+        *new_ptr = 0xC1002000U | PAGER_FRAME_LIMIT;
     }
 
     pager_print_stats();
@@ -416,6 +431,7 @@ static void print_help(void) {
     console_write_line("Quick start:");
     console_write_line("  mkfs -> installapps -> ls");
     console_write_line("  exec hello.app   then sched");
+    console_write_line("  pageralgo lru -> exec pagerdemo.app -> sched -> pager");
     console_write_line("  execp 8 counter.app");
     console_write_line("  memdemo          create allocator/tracker pair");
 
@@ -445,7 +461,7 @@ static void print_help(void) {
 
     console_write_line("System:");
     console_write_line("  help clear ticks mem");
-    console_write_line("  uservm ring3 pager pagertest memdemo");
+    console_write_line("  uservm ring3 pager pageralgo pagertest memdemo");
 }
 
 // 执行一条已经输入完成的命令字符串。
@@ -661,6 +677,10 @@ static void run_command(const char* cmd) {
             }
             if (!process_build_builtin_image("memtrack", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
                 !simplefs_write_file("memtrack.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("pagerdemo", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("pagerdemo.app", fs_command_buffer, image_size)) {
                 ok = 0;
             }
 
@@ -931,6 +951,32 @@ static void run_command(const char* cmd) {
     // pager：显示通用换页器状态。
     if (strcmp(cmd, "pager") == 0) {
         pager_print_stats();
+        return;
+    }
+
+    // pageralgo：显示或切换页面置换算法。
+    if (strcmp(cmd, "pageralgo") == 0) {
+        console_write("pager algorithm: ");
+        console_write_line(pager_algorithm_name(pager_get_algorithm()));
+        return;
+    }
+
+    if (strncmp(cmd, "pageralgo ", 10) == 0) {
+        const char* algorithm = skip_spaces(cmd + 10);
+
+        if (strcmp(algorithm, "clock") == 0) {
+            pager_set_algorithm(PAGER_ALGORITHM_CLOCK);
+            console_write_line("pager algorithm: clock");
+            return;
+        }
+
+        if (strcmp(algorithm, "lru") == 0) {
+            pager_set_algorithm(PAGER_ALGORITHM_LRU);
+            console_write_line("pager algorithm: lru");
+            return;
+        }
+
+        console_write_line("Usage: pageralgo [clock|lru]");
         return;
     }
 

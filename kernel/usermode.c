@@ -6,6 +6,7 @@
 #include "usermode.h"
 
 #include "../console/console.h"
+#include "../mm/pager.h"
 #include "../mm/vmm.h"
 #include "../shell/shell.h"
 #include "memdemo.h"
@@ -80,7 +81,6 @@ void usermode_handle_syscall(InterruptFrame* frame) {
         usermode_return_to_kernel(USERMODE_RETURN_YIELD);
     }
 
-    /* 未识别系统调用：把 eax 原样作为返回值带回去，便于调试。 */
     if (frame->eax == SYS_MEMDEMO_OP) {
         frame->eax = (uint32_t)memdemo_apply_op(frame->ebx, frame->ecx);
         return;
@@ -98,5 +98,25 @@ void usermode_handle_syscall(InterruptFrame* frame) {
         return;
     }
 
+    if (frame->eax == SYS_VM_ALLOC) {
+        frame->eax = process_vm_alloc_page(frame->ebx);
+        return;
+    }
+
+    if (frame->eax == SYS_VM_SAMPLE) {
+        if (pager_get_algorithm() == PAGER_ALGORITHM_LRU) {
+            pager_sample_usage();
+        }
+        frame->eax = 1U;
+        return;
+    }
+
+    if (frame->eax == SYS_PAGER_TRACE_RESET) {
+        pager_clear_victim_trace();
+        frame->eax = 1U;
+        return;
+    }
+
+    /* 未识别系统调用：把 eax 原样作为返回值带回去，便于调试。 */
     usermode_return_to_kernel(frame->eax);
 }

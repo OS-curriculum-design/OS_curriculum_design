@@ -15,6 +15,11 @@
 #define PROCESS_KILL_NOT_FOUND 0
 #define PROCESS_KILL_RUNNING -1
 
+/* 用户态 SYS_SPAWN_APP 使用的内建应用编号，避免先实现复杂的用户态路径字符串传递。 */
+#define PROCESS_APP_HELLO   1U
+#define PROCESS_APP_COUNTER 2U
+#define PROCESS_APP_BUSY    3U
+
 /*
  * 进程调度接口
  * ============
@@ -46,6 +51,8 @@ int process_spawn_child_from_buffer_with_priority(int parent_pid, const char* na
 int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image_capacity, uint32_t* image_size_out);
 /* 为当前用户进程登记一个按需换入的数据页，返回用户虚拟地址。 */
 uint32_t process_vm_alloc_page(uint32_t page_index);
+/* 由当前正在运行的用户进程主动创建内建子进程，返回子进程 pid，失败返回 0。 */
+int process_spawn_builtin_child_for_current(uint32_t app_id);
 /* 立即运行一个已创建的 READY 进程。 */
 int process_run_pid(int pid);
 /* 调度一个 READY 进程运行。 */

@@ -212,6 +212,46 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
     return process_spawn_from_buffer_with_priority(name, image, image_size, PROCESS_PRIORITY_DEFAULT);
 }
 
+int process_spawn_builtin_child_for_current(uint32_t app_id) {
+    static uint8_t child_image[PROCESS_IMAGE_MAX];
+    const char* build_name;
+    const char* process_name;
+    uint32_t image_size = 0;
+    Process* parent;
+
+    /*
+     * 简化版“进程主动创建子进程”：
+     * 用户态只传 app_id，内核负责选择内建 app、构造镜像，并自动使用 current_pid 作为父 PID。
+     */
+    if (current_pid == 0) {
+        return 0;
+    }
+
+    parent = find_process_by_pid(current_pid);
+    if (parent == (Process*)0 || parent->state != PROCESS_RUNNING) {
+        return 0;
+    }
+
+    if (app_id == PROCESS_APP_HELLO) {
+        build_name = "hello";
+        process_name = "hello.app";
+    } else if (app_id == PROCESS_APP_COUNTER) {
+        build_name = "counter";
+        process_name = "counter.app";
+    } else if (app_id == PROCESS_APP_BUSY) {
+        build_name = "busy";
+        process_name = "busy.app";
+    } else {
+        return 0;
+    }
+
+    if (!process_build_builtin_image(build_name, child_image, PROCESS_IMAGE_MAX, &image_size)) {
+        return 0;
+    }
+
+    return process_spawn_child_from_buffer(current_pid, process_name, child_image, image_size);
+}
+
 uint32_t process_vm_alloc_page(uint32_t page_index) {
     Process* process;
     uint32_t virt_addr;
@@ -417,6 +457,15 @@ static void emit_vm_sample(uint8_t* image, uint32_t* offset) {
     emit_u8(image, offset, 0x80);
 }
 
+static void emit_spawn_app(uint8_t* image, uint32_t* offset, uint32_t app_id) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_SPAWN_APP */
+    emit_u32(image, offset, SYS_SPAWN_APP);
+    emit_u8(image, offset, 0xBB); /* mov ebx, app_id */
+    emit_u32(image, offset, app_id);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
 static void emit_pager_trace_reset(uint8_t* image, uint32_t* offset) {
     emit_u8(image, offset, 0xB8); /* mov eax, SYS_PAGER_TRACE_RESET */
     emit_u32(image, offset, SYS_PAGER_TRACE_RESET);
@@ -522,6 +571,45 @@ static uint32_t build_counter_image(uint8_t* image) {
     patch_message_address(image, patch1, msg1_offset);
     patch_message_address(image, patch2, msg2_offset);
     patch_message_address(image, patch3, msg3_offset);
+    return offset;
+}
+
+static uint32_t build_spawner_image(uint8_t* image) {
+    static const char msg1[] = "spawner: hello child created\n";
+    static const char msg2[] = "spawner: exiting\n";
+    uint32_t offset = 0;
+    uint32_t patch1;
+    uint32_t patch2;
+    uint32_t len1;
+    uint32_t len2;
+    uint32_t msg1_offset;
+    uint32_t msg2_offset;
+
+    memset(image, 0, PROCESS_IMAGE_MAX);
+
+    /*
+     * 这个内建程序用于演示“进程自己创建子进程”：
+     * 先通过 SYS_SPAWN_APP 请求内核创建 hello.app 子进程，再主动 yield，
+     * 这样在第一次 sched 后用 ps 可以看到父进程和子进程同时存在。
+     */
+    emit_spawn_app(image, &offset, PROCESS_APP_HELLO);
+    emit_write_string(image, &offset, msg1, &patch1, &len1);
+    emit_yield(image, &offset);
+    emit_write_string(image, &offset, msg2, &patch2, &len2);
+    emit_exit(image, &offset, 0);
+
+    msg1_offset = offset;
+    for (uint32_t i = 0; i < len1; i++) {
+        image[offset++] = (uint8_t)msg1[i];
+    }
+
+    msg2_offset = offset;
+    for (uint32_t i = 0; i < len2; i++) {
+        image[offset++] = (uint8_t)msg2[i];
+    }
+
+    patch_message_address(image, patch1, msg1_offset);
+    patch_message_address(image, patch2, msg2_offset);
     return offset;
 }
 
@@ -718,6 +806,8 @@ int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image
         image_size = build_counter_image(image);
     } else if (strcmp(name, "busy") == 0) {
         image_size = build_busy_image(image);
+    } else if (strcmp(name, "spawner") == 0) {
+        image_size = build_spawner_image(image);
     } else if (strcmp(name, "memalloc") == 0) {
         image_size = build_memalloc_image(image);
     } else if (strcmp(name, "memtrack") == 0) {

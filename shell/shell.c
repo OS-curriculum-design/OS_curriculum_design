@@ -431,6 +431,7 @@ static void print_help(void) {
     console_write_line("Quick start:");
     console_write_line("  mkfs -> installapps -> ls");
     console_write_line("  exec hello.app   then sched");
+    console_write_line("  exec spawner.app then sched -> ps");
     console_write_line("  pageralgo lru -> exec pagerdemo.app -> sched -> pager");
     console_write_line("  execp 8 counter.app");
     console_write_line("  memdemo          create allocator/tracker pair");
@@ -440,6 +441,7 @@ static void print_help(void) {
     console_write_line("  exec <file.app>          create READY process from SimpleFS");
     console_write_line("  execp <prio> <file.app>  create READY process with priority");
     console_write_line("  spawn <ppid> <file.app>  create child process");
+    console_write_line("  spawner.app              process creates hello child by syscall");
 
     console_write_line("Process:");
     console_write_line("  ps sched reap kill <pid>");
@@ -671,6 +673,10 @@ static void run_command(const char* cmd) {
             }
             if (!process_build_builtin_image("busy", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
                 !simplefs_write_file("busy.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("spawner", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("spawner.app", fs_command_buffer, image_size)) {
                 ok = 0;
             }
             if (!process_build_builtin_image("memalloc", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||

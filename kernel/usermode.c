@@ -118,5 +118,14 @@ void usermode_handle_syscall(InterruptFrame* frame) {
     }
 
     /* 未识别系统调用：把 eax 原样作为返回值带回去，便于调试。 */
+    if (frame->eax == SYS_SPAWN_APP) {
+        /*
+         * 简化版子进程创建系统调用：
+         * ebx 传内建 app 编号，父进程 PID 由 process 层根据 current_pid 自动填写。
+         */
+        frame->eax = (uint32_t)process_spawn_builtin_child_for_current(frame->ebx);
+        return;
+    }
+
     usermode_return_to_kernel(frame->eax);
 }

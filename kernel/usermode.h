@@ -22,6 +22,7 @@
 #define SYS_VM_ALLOC       7U
 #define SYS_VM_SAMPLE      8U
 #define SYS_PAGER_TRACE_RESET 9U
+#define SYS_SPAWN_APP     10U
 
 #define USERMODE_RETURN_YIELD 0xFFFFFFFEU
 

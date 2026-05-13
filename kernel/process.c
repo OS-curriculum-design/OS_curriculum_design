@@ -18,6 +18,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../timer/timer.h"
+#include "banker.h"
 #include "memdemo.h"
 #include "usermode.h"
 
@@ -748,6 +749,7 @@ static void release_process(Process* process) {
 
     /* 释放 PCB 前先处理父子关系，避免子进程留下悬空的 parent_pid。 */
     adopt_children(process->pid);
+    banker_unregister_process(process->pid);
 
     if (process->page_directory_phys != 0) {
         memdemo_release_for_directory(process->page_directory_phys);

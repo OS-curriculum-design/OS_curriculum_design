@@ -13,6 +13,7 @@
 #include "../drivers/keyboard.h"
 #include "../fs/simplefs.h"
 #include "../include/string.h"
+#include "../kernel/banker.h"
 #include "../kernel/memdemo.h"
 #include "../kernel/process.h"
 #include "../kernel/usermode.h"
@@ -306,6 +307,39 @@ static int load_app_file(const char* name, uint32_t* image_size_out) {
            *image_size_out != 0;
 }
 
+static int parse_three_resources(const char** args_io, uint32_t* values) {
+    for (uint32_t i = 0; i < BANKER_RESOURCE_COUNT; i++) {
+        if (!parse_leading_uint(args_io, &values[i])) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void print_banker_result(const char* action, int result) {
+    if (result == BANKER_OK) {
+        console_write(action);
+        console_write_line(": ok");
+    } else if (result == BANKER_ERR_NOT_READY) {
+        console_write_line("banker failed: run banker init first.");
+    } else if (result == BANKER_ERR_NO_SLOT) {
+        console_write_line("banker failed: table is full.");
+    } else if (result == BANKER_ERR_NO_PROCESS) {
+        console_write_line("banker failed: pid is not registered.");
+    } else if (result == BANKER_ERR_OVER_NEED) {
+        console_write_line("banker denied: request exceeds Need.");
+    } else if (result == BANKER_ERR_OVER_AVAILABLE) {
+        console_write_line("banker denied: request exceeds Available.");
+    } else if (result == BANKER_ERR_UNSAFE) {
+        console_write_line("banker denied: unsafe state.");
+    } else if (result == BANKER_ERR_OVER_ALLOCATED) {
+        console_write_line("banker failed: release exceeds Allocation.");
+    } else {
+        console_write_line("banker failed.");
+    }
+}
+
 static void spawn_memdemo_processes(void) {
     uint32_t image_size = 0;
     int alloc_pid;
@@ -449,6 +483,7 @@ static void print_help(void) {
     console_write_line("  prio <pid> <prio>");
     console_write_line("  autosched [on|off]");
     console_write_line("  slice [ticks]");
+    console_write_line("  banker init/add/req/rel/show");
 
     console_write_line("Files:");
     console_write_line("  mkfs fsstat pwd ls");
@@ -914,6 +949,72 @@ static void run_command(const char* cmd) {
     // ps：显示当前进程表。
     if (strcmp(cmd, "ps") == 0) {
         process_print_table();
+        return;
+    }
+
+    // banker：显示银行家算法当前表，包括 Available / Max / Allocation / Need。
+    if (strcmp(cmd, "banker") == 0 || strcmp(cmd, "banker show") == 0) {
+        banker_print_state();
+        return;
+    }
+
+    // banker init <r0> <r1> <r2>：初始化三类抽象资源的 Available 向量。
+    if (strncmp(cmd, "banker init ", 12) == 0) {
+        const char* args = cmd + 12;
+        uint32_t values[BANKER_RESOURCE_COUNT];
+
+        if (!parse_three_resources(&args, values)) {
+            console_write_line("Usage: banker init <r0> <r1> <r2>");
+            return;
+        }
+
+        banker_init(values);
+        console_write_line("banker init: ok");
+        return;
+    }
+
+    // banker add <pid> <max0> <max1> <max2>：登记进程最大需求 Max。
+    if (strncmp(cmd, "banker add ", 11) == 0) {
+        const char* args = cmd + 11;
+        uint32_t pid = 0;
+        uint32_t values[BANKER_RESOURCE_COUNT];
+
+        if (!parse_leading_uint(&args, &pid) || !parse_three_resources(&args, values)) {
+            console_write_line("Usage: banker add <pid> <max0> <max1> <max2>");
+            return;
+        }
+
+        print_banker_result("banker add", banker_register_process((int)pid, values));
+        return;
+    }
+
+    // banker req <pid> <r0> <r1> <r2>：请求资源，只有安全状态才会真正分配。
+    if (strncmp(cmd, "banker req ", 11) == 0) {
+        const char* args = cmd + 11;
+        uint32_t pid = 0;
+        uint32_t values[BANKER_RESOURCE_COUNT];
+
+        if (!parse_leading_uint(&args, &pid) || !parse_three_resources(&args, values)) {
+            console_write_line("Usage: banker req <pid> <r0> <r1> <r2>");
+            return;
+        }
+
+        print_banker_result("banker req", banker_request((int)pid, values));
+        return;
+    }
+
+    // banker rel <pid> <r0> <r1> <r2>：释放进程已经占有的一部分资源。
+    if (strncmp(cmd, "banker rel ", 11) == 0) {
+        const char* args = cmd + 11;
+        uint32_t pid = 0;
+        uint32_t values[BANKER_RESOURCE_COUNT];
+
+        if (!parse_leading_uint(&args, &pid) || !parse_three_resources(&args, values)) {
+            console_write_line("Usage: banker rel <pid> <r0> <r1> <r2>");
+            return;
+        }
+
+        print_banker_result("banker rel", banker_release((int)pid, values));
         return;
     }
 

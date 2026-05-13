@@ -7,7 +7,8 @@
  * - 一页用户栈
  * - 一份可恢复的用户寄存器上下文
  *
- * 调度策略采用简单轮转，并通过 SYS_YIELD / 时钟抢占切回内核。
+ * 调度策略采用“高优先级优先 + 同优先级轮转”，
+ * 并通过 SYS_YIELD / 时钟抢占切回内核。
  */
 #include "process.h"
 
@@ -25,11 +26,15 @@
 #define PROCESS_USER_CODE_BASE  0x00800000U
 #define PROCESS_USER_STACK_TOP  0xBFFF0000U
 #define PROCESS_USER_STACK_PAGE (PROCESS_USER_STACK_TOP - PAGE_SIZE)
+#define PROCESS_PRIORITY_DEFAULT 5
+#define PROCESS_PRIORITY_MIN 0
+#define PROCESS_PRIORITY_MAX 10
 
 typedef struct {
     int used;
     int pid;
     ProcessState state;
+    int priority;
     const char* name;
     UserContext context;
     uint32_t page_directory_phys;
@@ -80,6 +85,7 @@ static Process* allocate_process(void) {
             processes[i].used = 1;
             processes[i].pid = next_pid++;
             processes[i].state = PROCESS_READY;
+            processes[i].priority = PROCESS_PRIORITY_DEFAULT;
             processes[i].name = "";
             memset(&processes[i].context, 0, sizeof(UserContext));
             processes[i].context.eip = PROCESS_USER_CODE_BASE;
@@ -95,10 +101,14 @@ static Process* allocate_process(void) {
     return (Process*)0;
 }
 
-int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
+int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* image, uint32_t image_size, int priority) {
     Process* process;
 
-    if (image == (const uint8_t*)0 || image_size == 0 || image_size > PROCESS_IMAGE_MAX) {
+    if (image == (const uint8_t*)0 ||
+        image_size == 0 ||
+        image_size > PROCESS_IMAGE_MAX ||
+        priority < PROCESS_PRIORITY_MIN ||
+        priority > PROCESS_PRIORITY_MAX) {
         return 0;
     }
 
@@ -108,6 +118,7 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
     }
 
     process->name = name;
+    process->priority = priority;
     process->image_size = image_size;
     if (!vmm_create_address_space(&process->page_directory_phys)) {
         process->used = 0;
@@ -144,6 +155,10 @@ int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t i
     }
 
     return process->pid;
+}
+
+int process_spawn_from_buffer(const char* name, const uint8_t* image, uint32_t image_size) {
+    return process_spawn_from_buffer_with_priority(name, image, image_size, PROCESS_PRIORITY_DEFAULT);
 }
 
 static uint32_t build_hello_image(uint8_t* image) {
@@ -388,6 +403,7 @@ static void release_process(Process* process) {
     process->used = 0;
     process->pid = 0;
     process->state = PROCESS_UNUSED;
+    process->priority = PROCESS_PRIORITY_DEFAULT;
     process->name = "";
     memset(&process->context, 0, sizeof(UserContext));
     process->page_directory_phys = 0;
@@ -401,6 +417,7 @@ void process_init(void) {
         processes[i].used = 0;
         processes[i].pid = 0;
         processes[i].state = PROCESS_UNUSED;
+        processes[i].priority = PROCESS_PRIORITY_DEFAULT;
     }
 
     next_pid = 1;
@@ -430,6 +447,30 @@ int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image
     return 1;
 }
 
+static int select_next_ready_process(void) {
+    int selected = -1;
+    int best_priority = PROCESS_PRIORITY_MIN - 1;
+
+    /*
+     * 优先级调度策略：
+     * - 优先选择 READY 队列中优先级最高的进程
+     * - 对同优先级进程，仍然从 schedule_cursor 开始顺序找，
+     *   因而保留轮转公平性
+     */
+    for (int offset = 0; offset < PROCESS_MAX; offset++) {
+        int i = (schedule_cursor + offset) % PROCESS_MAX;
+
+        if (processes[i].used &&
+            processes[i].state == PROCESS_READY &&
+            processes[i].priority > best_priority) {
+            best_priority = processes[i].priority;
+            selected = i;
+        }
+    }
+
+    return selected;
+}
+
 int process_schedule(void) {
     /* 手工调度入口，本质上只是包装了自动调度逻辑。 */
     if (process_schedule_auto()) {
@@ -441,33 +482,31 @@ int process_schedule(void) {
 }
 
 int process_schedule_auto(void) {
-    /* 从 schedule_cursor 开始做一圈线性扫描，实现最简单的 round-robin。 */
-    for (int offset = 0; offset < PROCESS_MAX; offset++) {
-        int i = (schedule_cursor + offset) % PROCESS_MAX;
+    int selected = select_next_ready_process();
+    Process* process;
+    int pid;
 
-        if (processes[i].used && processes[i].state == PROCESS_READY) {
-            int pid = processes[i].pid;
-
-            if (!process_run(pid)) {
-                console_write_line("process run failed");
-                return 0;
-            }
-
-            /* 下次从当前成功运行项的下一个槽位开始找。 */
-            schedule_cursor = (i + 1) % PROCESS_MAX;
-            Process* process = find_process_by_pid(pid);
-            if (process != (Process*)0 && process->state == PROCESS_ZOMBIE) {
-                console_write("process exited: pid=");
-                console_write_dec(pid);
-                console_write(" code=");
-                console_write_dec((int)process->exit_code);
-                console_put_char('\n');
-            }
-            return pid;
-        }
+    if (selected < 0) {
+        return 0;
     }
 
-    return 0;
+    pid = processes[selected].pid;
+    if (!process_run(pid)) {
+        console_write_line("process run failed");
+        return 0;
+    }
+
+    /* 下次从当前成功运行项的下一个槽位开始找。 */
+    schedule_cursor = (selected + 1) % PROCESS_MAX;
+    process = find_process_by_pid(pid);
+    if (process != (Process*)0 && process->state == PROCESS_ZOMBIE) {
+        console_write("process exited: pid=");
+        console_write_dec(pid);
+        console_write(" code=");
+        console_write_dec((int)process->exit_code);
+        console_put_char('\n');
+    }
+    return pid;
 }
 
 int process_run_pid(int pid) {
@@ -551,6 +590,38 @@ int process_has_ready(void) {
     return 0;
 }
 
+int process_set_priority(int pid, int priority) {
+    Process* process;
+
+    if (priority < PROCESS_PRIORITY_MIN || priority > PROCESS_PRIORITY_MAX) {
+        return 0;
+    }
+
+    process = find_process_by_pid(pid);
+    if (process == (Process*)0 || process->state == PROCESS_ZOMBIE) {
+        return 0;
+    }
+
+    process->priority = priority;
+    return 1;
+}
+
+int process_get_priority(int pid, int* priority_out) {
+    Process* process;
+
+    if (priority_out == (int*)0) {
+        return 0;
+    }
+
+    process = find_process_by_pid(pid);
+    if (process == (Process*)0) {
+        return 0;
+    }
+
+    *priority_out = process->priority;
+    return 1;
+}
+
 int process_auto_schedule_enabled(void) {
     return auto_schedule_enabled;
 }
@@ -574,7 +645,7 @@ int process_reap_zombies(void) {
 }
 
 void process_print_table(void) {
-    console_write_line("PID  STATE    NAME");
+    console_write_line("PID  PRI  STATE    NAME");
 
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (!processes[i].used) {
@@ -582,6 +653,8 @@ void process_print_table(void) {
         }
 
         console_write_dec(processes[i].pid);
+        console_write("    ");
+        console_write_dec(processes[i].priority);
         console_write("    ");
 
         if (processes[i].state == PROCESS_READY) {

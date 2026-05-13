@@ -375,16 +375,17 @@ static void fs_print_mount_hint(void) {
 static void print_help(void) {
     console_write_line("Quick start:");
     console_write_line("  mkfs -> installapps -> ls");
-    console_write_line("  run hello.app");
     console_write_line("  exec hello.app   then sched");
+    console_write_line("  execp 8 counter.app");
 
     console_write_line("Apps:");
     console_write_line("  installapps              write hello.app counter.app busy.app");
     console_write_line("  exec <file.app>          create READY process from SimpleFS");
-    console_write_line("  run <file.app>           create and run now");
+    console_write_line("  execp <prio> <file.app>  create READY process with priority");
 
     console_write_line("Process:");
     console_write_line("  ps sched reap");
+    console_write_line("  prio <pid> <prio>");
     console_write_line("  autosched [on|off]");
     console_write_line("  slice [ticks]");
 
@@ -646,6 +647,50 @@ static void run_command(const char* cmd) {
         return;
     }
 
+    // execp <prio> <file.app>：按指定优先级创建 READY 进程。
+    if (strncmp(cmd, "execp ", 6) == 0) {
+        const char* args = cmd + 6;
+        const char* file_name;
+        uint32_t priority = 0;
+        uint32_t image_size = 0;
+        int pid;
+
+        fs_print_mount_hint();
+        if (simplefs_is_mounted()) {
+            if (!parse_leading_uint(&args, &priority)) {
+                console_write_line("Usage: execp <priority 0..10> <file.app>");
+                return;
+            }
+
+            file_name = skip_spaces(args);
+            if (*file_name == '\0') {
+                console_write_line("Usage: execp <priority 0..10> <file.app>");
+                return;
+            }
+
+            if (!load_app_file(file_name, &image_size)) {
+                console_write_line("execp failed: cannot read app.");
+                return;
+            }
+
+            pid = process_spawn_from_buffer_with_priority(file_name,
+                                                          fs_command_buffer,
+                                                          image_size,
+                                                          (int)priority);
+            if (pid == 0) {
+                console_write_line("execp failed: priority must be 0..10 or process table is full.");
+                return;
+            }
+
+            console_write("created process pid=");
+            console_write_dec(pid);
+            console_write(" priority=");
+            console_write_dec((int)priority);
+            console_put_char('\n');
+        }
+        return;
+    }
+
     // open <name> / close <fd> / fds：演示打开文件表。
     if (strncmp(cmd, "open ", 5) == 0) {
         int fd;
@@ -753,29 +798,27 @@ static void run_command(const char* cmd) {
         return;
     }
 
-    // run <file.app>：从 SimpleFS 读取程序镜像，创建后立刻运行。
-    if (strncmp(cmd, "run ", 4) == 0) {
-        uint32_t image_size = 0;
-        int pid;
-        const char* name = skip_spaces(cmd + 4);
+    // prio <pid> <prio>：动态修改一个现有进程的优先级。
+    if (strncmp(cmd, "prio ", 5) == 0) {
+        const char* args = cmd + 5;
+        uint32_t pid = 0;
+        uint32_t priority = 0;
 
-        fs_print_mount_hint();
-        if (simplefs_is_mounted()) {
-            if (!load_app_file(name, &image_size)) {
-                console_write_line("run failed: cannot read app.");
-                return;
-            }
-
-            pid = process_spawn_from_buffer(name, fs_command_buffer, image_size);
-            if (pid == 0) {
-                console_write_line("run failed: cannot create process.");
-                return;
-            }
-
-            if (!process_run_pid(pid)) {
-                console_write_line("run failed: cannot run process.");
-            }
+        if (!parse_leading_uint(&args, &pid) || !parse_leading_uint(&args, &priority)) {
+            console_write_line("Usage: prio <pid> <priority 0..10>");
+            return;
         }
+
+        if (!process_set_priority((int)pid, (int)priority)) {
+            console_write_line("prio failed: pid not found or priority must be 0..10.");
+            return;
+        }
+
+        console_write("priority updated: pid=");
+        console_write_dec((int)pid);
+        console_write(" priority=");
+        console_write_dec((int)priority);
+        console_put_char('\n');
         return;
     }
 

@@ -1,0 +1,119 @@
+指令清单
+
+基础类
+
+help：显示帮助信息
+clear：清屏
+ticks：显示当前时钟 tick 数
+mem：显示物理内存、页大小、分页和映射状态
+uservm：显示用户态虚拟地址空间示例
+ring3：运行 ring3 用户态演示
+pager：显示分页器统计信息
+pagertest：触发真实 #PF 分页换入/换出测试
+memdemo：创建真实内存分配进程和内存跟踪进程，输出并记录内存活动
+
+进程类
+
+ps：显示进程表
+sched：调度一个 READY 进程运行
+exec <file.app>：从文件系统读取 app 并创建进程
+execp <prio> <file.app>：按指定优先级创建进程，优先级范围 0 到 10
+prio <pid> <prio>：修改进程优先级，优先级范围 0 到 10
+autosched：查看自动调度开关状态
+autosched on：开启自动调度
+autosched off：关闭自动调度
+reap：回收已退出的僵尸进程
+slice：查看当前时间片
+slice <ticks>：设置时间片长度，单位为 tick
+
+文件系统类
+
+mkfs：格式化 SimpleFS
+fsstat：查看文件系统状态
+pwd：显示当前目录
+ls：列出当前目录内容
+mkdir <dir>：创建目录
+rmdir <dir>：删除空目录
+cd <dir>：进入子目录
+cd ..：返回上级目录
+cd /：回到根目录
+touch <file>：创建空文件
+rm <file>：删除文件
+cat <file>：显示文件内容
+write <file> <text>：覆盖写入文件，不存在则创建
+append <file> <text>：追加写入文件
+bigfiletest：运行一组大文件读写测试
+bigfiletest <size>：按指定字节数运行大文件读写测试
+
+文件描述符类
+
+open <file>：打开文件，返回 fd
+close <fd>：关闭文件描述符
+fds：显示当前打开的 fd 列表
+read <fd>：从当前偏移读取到文件末尾
+writefd <fd> <text>：从当前偏移写入
+seek <fd> <offset>：设置 fd 当前偏移
+
+文件系统中的应用程序
+
+installapps：把内建 app 安装到文件系统中
+exec <file.app>：从文件系统读取 app 并创建进程
+execp <prio> <file.app>：从文件系统读取 app 并按优先级创建进程
+memdemo：直接创建 memalloc.app 和 memtrack.app 两个进程
+
+当前支持的内建 app
+
+hello.app：输出 hello from user process 后退出
+counter.app：分三步输出 counter step，每步后主动 yield
+busy.app：分三步输出 busy step，中间忙等，适合测试抢占调度
+memalloc.app：调用 PMM/VMM 分配真实物理页，并在用户态写入映射页
+memtrack.app：同步等待真实内存操作，打印状态并写入 memdemo.log
+
+常见用法示例
+
+mkfs
+installapps
+ls
+exec hello.app
+sched
+exec counter.app
+exec busy.app
+ps
+autosched on
+slice 10
+prio 1 8
+reap
+mem
+pager
+pagertest
+memdemo
+cat memdemo.log
+mkdir test
+cd test
+write note.txt hello world
+append note.txt !!!
+cat note.txt
+open note.txt
+writefd 0 abc
+seek 0 0
+read 0
+close 0
+
+开发环境构建命令
+
+make all：编译并生成 myos.iso
+make check：检查 myos.bin 是否为有效 multiboot 内核
+make run：用 QEMU 启动 MyOS
+make clean：清理构建产物
+
+当前注意事项
+
+当前 Shell 不支持 run <app>
+当前 Shell 不支持 spawn <app>
+当前 Shell 不支持 edit <file> <text>，可使用 write <file> <text> 代替
+当前 Shell 不支持引号、管道、重定向和后台任务
+当前页大小为 4KiB
+memdemo 使用真实 PMM/VMM 页，单页大小为 4KiB，演示槽位为 8 页
+SimpleFS 单文件最大 68608 字节
+最多同时打开 8 个文件描述符
+最多同时存在 8 个进程表项

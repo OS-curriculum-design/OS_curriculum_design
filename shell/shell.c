@@ -13,6 +13,7 @@
 #include "../drivers/keyboard.h"
 #include "../fs/simplefs.h"
 #include "../include/string.h"
+#include "../kernel/memdemo.h"
 #include "../kernel/process.h"
 #include "../kernel/usermode.h"
 #include "../mm/pager.h"
@@ -290,6 +291,45 @@ static int load_app_file(const char* name, uint32_t* image_size_out) {
            *image_size_out != 0;
 }
 
+static void spawn_memdemo_processes(void) {
+    uint32_t image_size = 0;
+    int alloc_pid;
+    int track_pid;
+
+    memdemo_reset();
+
+    if (!process_build_builtin_image("memalloc", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size)) {
+        console_write_line("memdemo failed: cannot build allocator.");
+        return;
+    }
+
+    alloc_pid = process_spawn_from_buffer("memalloc.app", fs_command_buffer, image_size);
+    if (alloc_pid == 0) {
+        console_write_line("memdemo failed: cannot create allocator process.");
+        return;
+    }
+
+    if (!process_build_builtin_image("memtrack", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size)) {
+        console_write_line("memdemo failed: cannot build tracker.");
+        return;
+    }
+
+    track_pid = process_spawn_from_buffer("memtrack.app", fs_command_buffer, image_size);
+    if (track_pid == 0) {
+        console_write_line("memdemo failed: cannot create tracker process.");
+        return;
+    }
+
+    console_write("memdemo created: allocator pid=");
+    console_write_dec(alloc_pid);
+    console_write(" tracker pid=");
+    console_write_dec(track_pid);
+    console_put_char('\n');
+
+    console_write("memory log file: ");
+    console_write_line(simplefs_is_mounted() ? memdemo_log_name() : "not mounted, console only");
+}
+
 static uint8_t bigfile_test_byte(uint32_t index) {
     static const char pattern[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     return (uint8_t)pattern[index % (sizeof(pattern) - 1U)];
@@ -377,9 +417,10 @@ static void print_help(void) {
     console_write_line("  mkfs -> installapps -> ls");
     console_write_line("  exec hello.app   then sched");
     console_write_line("  execp 8 counter.app");
+    console_write_line("  memdemo          create allocator/tracker pair");
 
     console_write_line("Apps:");
-    console_write_line("  installapps              write hello.app counter.app busy.app");
+    console_write_line("  installapps              write built-in .app files");
     console_write_line("  exec <file.app>          create READY process from SimpleFS");
     console_write_line("  execp <prio> <file.app>  create READY process with priority");
 
@@ -404,7 +445,7 @@ static void print_help(void) {
 
     console_write_line("System:");
     console_write_line("  help clear ticks mem");
-    console_write_line("  uservm ring3 pager pagertest");
+    console_write_line("  uservm ring3 pager pagertest memdemo");
 }
 
 // 执行一条已经输入完成的命令字符串。
@@ -612,6 +653,14 @@ static void run_command(const char* cmd) {
             }
             if (!process_build_builtin_image("busy", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
                 !simplefs_write_file("busy.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("memalloc", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("memalloc.app", fs_command_buffer, image_size)) {
+                ok = 0;
+            }
+            if (!process_build_builtin_image("memtrack", fs_command_buffer, SIMPLEFS_MAX_FILE_SIZE, &image_size) ||
+                !simplefs_write_file("memtrack.app", fs_command_buffer, image_size)) {
                 ok = 0;
             }
 
@@ -892,6 +941,11 @@ static void run_command(const char* cmd) {
     }
 
     // slice：显示当前时间片设置，同时输出 tick 和毫秒两种单位。
+    if (strcmp(cmd, "memdemo") == 0) {
+        spawn_memdemo_processes();
+        return;
+    }
+
     if (strcmp(cmd, "slice") == 0) {
         uint32_t ticks = timer_get_timeslice();
         console_write("Round-robin time slice: ");

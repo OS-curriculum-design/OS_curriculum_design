@@ -8,6 +8,7 @@
 #include "../console/console.h"
 #include "../mm/vmm.h"
 #include "../shell/shell.h"
+#include "memdemo.h"
 #include "process.h"
 
 /* 只在第一次使用时构造演示地址空间，后续复用。 */
@@ -80,5 +81,22 @@ void usermode_handle_syscall(InterruptFrame* frame) {
     }
 
     /* 未识别系统调用：把 eax 原样作为返回值带回去，便于调试。 */
+    if (frame->eax == SYS_MEMDEMO_OP) {
+        frame->eax = (uint32_t)memdemo_apply_op(frame->ebx, frame->ecx);
+        return;
+    }
+
+    if (frame->eax == SYS_MEMDEMO_RESET) {
+        memdemo_reset();
+        frame->eax = 1U;
+        return;
+    }
+
+    if (frame->eax == SYS_MEMDEMO_REPORT) {
+        shell_note_async_output();
+        frame->eax = (uint32_t)memdemo_report_event(frame->ebx);
+        return;
+    }
+
     usermode_return_to_kernel(frame->eax);
 }

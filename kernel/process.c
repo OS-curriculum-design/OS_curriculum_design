@@ -18,6 +18,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../timer/timer.h"
+#include "memdemo.h"
 #include "usermode.h"
 
 /* 当前系统最多同时容纳 8 个进程，便于教学和调试。 */
@@ -147,6 +148,7 @@ int process_spawn_from_buffer_with_priority(const char* name, const uint8_t* ima
     if (!pager_register_page_in_directory(process->page_directory_phys,
                                           PROCESS_USER_STACK_PAGE,
                                           VMM_PAGE_WRITABLE | VMM_PAGE_USER)) {
+        memdemo_release_for_directory(process->page_directory_phys);
         pager_unregister_page(process->page_directory_phys, PROCESS_USER_CODE_BASE);
         vmm_destroy_address_space(process->page_directory_phys);
         process->used = 0;
@@ -296,6 +298,70 @@ static void emit_yield(uint8_t* image, uint32_t* offset) {
     emit_u8(image, offset, 0x80);
 }
 
+static void emit_memdemo_op(uint8_t* image, uint32_t* offset, uint32_t op, uint32_t page) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_MEMDEMO_OP */
+    emit_u32(image, offset, SYS_MEMDEMO_OP);
+    emit_u8(image, offset, 0xBB); /* mov ebx, op */
+    emit_u32(image, offset, op);
+    emit_u8(image, offset, 0xB9); /* mov ecx, page */
+    emit_u32(image, offset, page);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
+static void emit_user_write_eax(uint8_t* image, uint32_t* offset, uint32_t value) {
+    emit_u8(image, offset, 0xC7); /* mov dword ptr [eax], imm32 */
+    emit_u8(image, offset, 0x00);
+    emit_u32(image, offset, value);
+}
+
+static void emit_memdemo_reset(uint8_t* image, uint32_t* offset) {
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_MEMDEMO_RESET */
+    emit_u32(image, offset, SYS_MEMDEMO_RESET);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+}
+
+static void emit_rel32(uint8_t* image, uint32_t patch_offset, int32_t rel) {
+    image[patch_offset] = (uint8_t)(rel & 0xFF);
+    image[patch_offset + 1U] = (uint8_t)((rel >> 8) & 0xFF);
+    image[patch_offset + 2U] = (uint8_t)((rel >> 16) & 0xFF);
+    image[patch_offset + 3U] = (uint8_t)((rel >> 24) & 0xFF);
+}
+
+static void emit_wait_memdemo_report(uint8_t* image, uint32_t* offset, uint32_t sequence) {
+    uint32_t loop_start = *offset;
+    uint32_t je_patch;
+    uint32_t jmp_patch;
+    uint32_t ready_offset;
+    int32_t rel;
+
+    emit_u8(image, offset, 0xB8); /* mov eax, SYS_MEMDEMO_REPORT */
+    emit_u32(image, offset, SYS_MEMDEMO_REPORT);
+    emit_u8(image, offset, 0xBB); /* mov ebx, sequence */
+    emit_u32(image, offset, sequence);
+    emit_u8(image, offset, 0xCD); /* int 0x80 */
+    emit_u8(image, offset, 0x80);
+
+    emit_u8(image, offset, 0x83); /* cmp eax, 1 */
+    emit_u8(image, offset, 0xF8);
+    emit_u8(image, offset, 0x01);
+    emit_u8(image, offset, 0x74); /* je ready */
+    je_patch = *offset;
+    emit_u8(image, offset, 0x00);
+
+    emit_yield(image, offset);
+    emit_u8(image, offset, 0xE9); /* jmp loop_start */
+    jmp_patch = *offset;
+    emit_u32(image, offset, 0);
+
+    ready_offset = *offset;
+    image[je_patch] = (uint8_t)(ready_offset - (je_patch + 1U));
+
+    rel = (int32_t)loop_start - (int32_t)(jmp_patch + 4U);
+    emit_rel32(image, jmp_patch, rel);
+}
+
 static void emit_exit(uint8_t* image, uint32_t* offset, uint32_t exit_code) {
     /* exit 返回后理论上不会继续执行，但这里仍补一个死循环做保险。 */
     emit_u8(image, offset, 0xB8); /* mov eax, SYS_EXIT */
@@ -357,6 +423,47 @@ static uint32_t build_counter_image(uint8_t* image) {
     return offset;
 }
 
+static uint32_t build_memalloc_image(uint8_t* image) {
+    static const uint32_t ops[MEMDEMO_EVENT_COUNT] = {
+        MEMDEMO_OP_ALLOC,
+        MEMDEMO_OP_ALLOC,
+        MEMDEMO_OP_TOUCH,
+        MEMDEMO_OP_ALLOC,
+        MEMDEMO_OP_FREE,
+        MEMDEMO_OP_ALLOC,
+        MEMDEMO_OP_TOUCH,
+        MEMDEMO_OP_FREE
+    };
+    static const uint32_t pages[MEMDEMO_EVENT_COUNT] = {
+        0U, 1U, 0U, 3U, 1U, 2U, 3U, 0U
+    };
+    uint32_t offset = 0;
+
+    memset(image, 0, PROCESS_IMAGE_MAX);
+    emit_memdemo_reset(image, &offset);
+    for (uint32_t i = 0; i < MEMDEMO_EVENT_COUNT; i++) {
+        emit_memdemo_op(image, &offset, ops[i], pages[i]);
+        if (ops[i] != MEMDEMO_OP_FREE) {
+            emit_user_write_eax(image, &offset, 0xA1100000U | (i << 8) | pages[i]);
+        }
+        emit_yield(image, &offset);
+    }
+    emit_exit(image, &offset, 0);
+    return offset;
+}
+
+static uint32_t build_memtrack_image(uint8_t* image) {
+    uint32_t offset = 0;
+
+    memset(image, 0, PROCESS_IMAGE_MAX);
+    for (uint32_t i = 1; i <= MEMDEMO_EVENT_COUNT; i++) {
+        emit_wait_memdemo_report(image, &offset, i);
+        emit_yield(image, &offset);
+    }
+    emit_exit(image, &offset, 0);
+    return offset;
+}
+
 static int process_run(int pid) {
     Process* process = find_process_by_pid(pid);
     uint32_t result;
@@ -394,6 +501,7 @@ static void release_process(Process* process) {
     }
 
     if (process->page_directory_phys != 0) {
+        memdemo_release_for_directory(process->page_directory_phys);
         /* Pager 会处理“已换入”和“仍在交换区”的两种页状态。 */
         pager_unregister_page(process->page_directory_phys, PROCESS_USER_CODE_BASE);
         pager_unregister_page(process->page_directory_phys, PROCESS_USER_STACK_PAGE);
@@ -439,6 +547,10 @@ int process_build_builtin_image(const char* name, uint8_t* image, uint32_t image
         image_size = build_counter_image(image);
     } else if (strcmp(name, "busy") == 0) {
         image_size = build_busy_image(image);
+    } else if (strcmp(name, "memalloc") == 0) {
+        image_size = build_memalloc_image(image);
+    } else if (strcmp(name, "memtrack") == 0) {
+        image_size = build_memtrack_image(image);
     } else {
         return 0;
     }

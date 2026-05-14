@@ -37,9 +37,11 @@
 #define DEFAULT_TOTAL_MEMORY_BYTES (128U * 1024U * 1024U)
 /* 1MiB 以下通常保留给历史兼容区域，不作为通用可分配内存。 */
 #define LOW_MEMORY_RESERVED_BYTES  0x00100000U
+/* 内核高地址直接映射基址；pmm_init 运行时分页已经由 bootstrap 打开。 */
+#define KERNEL_VIRT_BASE 0xC0000000U
 
-/* 链接脚本导出的内核结束地址（物理地址）。 */
-extern uint8_t __kernel_end[];
+/* 链接脚本导出的内核物理结束地址。 */
+extern uint8_t __kernel_phys_end[];
 
 /* 位图起始指针（映射到 pmm_bitmap_base）。 */
 static uint8_t* pmm_bitmap = (uint8_t*)0;
@@ -57,6 +59,10 @@ static uint32_t pmm_free_pages = 0;
 
 /* 初始化完成标记：1 表示可分配/可释放。 */
 static int pmm_ready = 0;
+
+static void* phys_to_bootstrap_virt(uint32_t phys_addr) {
+    return (void*)(KERNEL_VIRT_BASE + phys_addr);
+}
 
 /*
  * 向上对齐：
@@ -219,8 +225,9 @@ static void free_memory_from_map(const MultibootInfo* info) {
     uint32_t mmap_current;
     uint32_t mmap_end;
 
-    mmap_current = info->mmap_addr;
+    mmap_current = (uint32_t)phys_to_bootstrap_virt(info->mmap_addr);
     mmap_end = info->mmap_addr + info->mmap_length;
+    mmap_end = (uint32_t)phys_to_bootstrap_virt(mmap_end);
 
     while (mmap_current < mmap_end) {
         const MultibootMmapEntry* entry = (const MultibootMmapEntry*)mmap_current;
@@ -258,8 +265,8 @@ void pmm_init(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
     pmm_total_memory_bytes = detect_total_memory_bytes(multiboot_magic, info);
     pmm_total_pages = pmm_total_memory_bytes / PAGE_SIZE;
     pmm_bitmap_bytes = (pmm_total_pages + 7U) / 8U;
-    pmm_bitmap_base = align_up((uint32_t)__kernel_end, PAGE_SIZE);
-    pmm_bitmap = (uint8_t*)pmm_bitmap_base;
+    pmm_bitmap_base = align_up((uint32_t)__kernel_phys_end, PAGE_SIZE);
+    pmm_bitmap = (uint8_t*)phys_to_bootstrap_virt(pmm_bitmap_base);
 
     /* 2) 所有页默认标为“占用”。 */
     memset(pmm_bitmap, 0xFF, pmm_bitmap_bytes);

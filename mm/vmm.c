@@ -18,7 +18,6 @@
 #define PAGE_TABLE_ENTRIES 1024U
 #define CR0_PAGING 0x80000000U
 #define KERNEL_DIRECTORY_START (VMM_KERNEL_BASE >> 22)
-#define KERNEL_LOW_SHARED_DIRECTORIES 1U
 
 /* 当前 CPU 正在使用的页目录（内核可见虚拟地址）。 */
 static uint32_t* current_page_directory = (uint32_t*)0;
@@ -26,7 +25,7 @@ static uint32_t* current_page_directory = (uint32_t*)0;
 static uint32_t current_page_directory_phys = 0;
 /* 内核主页目录的物理地址，供进程切回内核时使用。 */
 static uint32_t kernel_page_directory_phys = 0;
-/* 恒等映射的低地址字节数。 */
+/* 正式页目录不保留低地址恒等映射；启动阶段的临时映射由 boot.s 负责。 */
 static uint32_t identity_mapped_bytes = 0;
 /* 高地址内核镜像映射字节数。 */
 static uint32_t kernel_mapped_bytes = 0;
@@ -70,13 +69,9 @@ static uint32_t* page_table_from_directory(uint32_t directory_entry) {
 
 static void* phys_to_virt(uint32_t phys_addr) {
     /*
-     * 分页未开启前，内核仍工作在“物理地址即线性地址”的阶段；
-     * 打开分页后，则通过高地址内核映射访问同一片物理内存。
+     * higher-half 内核在进入 C 代码前已经开启分页，
+     * 后续统一通过高地址 direct map 访问物理页。
      */
-    if (!paging_enabled) {
-        return (void*)phys_addr;
-    }
-
     return (void*)(VMM_KERNEL_BASE + phys_addr);
 }
 
@@ -311,6 +306,8 @@ int vmm_init(void) {
         return 0;
     }
 
+    paging_enabled = (read_cr0() & CR0_PAGING) != 0;
+
     current_page_directory_phys = pmm_alloc_page();
     if (current_page_directory_phys == 0) {
         return 0;
@@ -321,18 +318,12 @@ int vmm_init(void) {
     memset(current_page_directory, 0, PAGE_SIZE);
 
     /*
-     * 初始化阶段先为“全部物理内存”建立两套映射：
-     * - 低地址恒等映射，保证启动早期代码和设备地址仍可直接访问
-     * - 0xC0000000 以上高地址映射，作为后续内核长期使用的虚拟基址
-     */
-    identity_mapped_bytes = pmm_get_total_memory_bytes() & PAGE_ADDR_MASK;
-    kernel_mapped_bytes = identity_mapped_bytes;
-
-    for (uint32_t addr = 0; addr < identity_mapped_bytes; addr += PAGE_SIZE) {
-        if (!vmm_map_page(addr, addr, VMM_PAGE_WRITABLE)) {
-            return 0;
-        }
-    }
+     * 正式页目录只建立高地址 direct map：
+     *   0xC0000000 + phys -> phys
+     * 低地址临时恒等映射只存在于 boot.s 的 bootstrap 页目录中。
+    */
+    identity_mapped_bytes = 0;
+    kernel_mapped_bytes = pmm_get_total_memory_bytes() & PAGE_ADDR_MASK;
 
     for (uint32_t addr = 0; addr < kernel_mapped_bytes; addr += PAGE_SIZE) {
         if (!vmm_map_page(VMM_KERNEL_BASE + addr, addr, VMM_PAGE_WRITABLE)) {
@@ -340,11 +331,13 @@ int vmm_init(void) {
         }
     }
 
-    /* 先装入页目录，再置位 CR0.PG 打开分页。 */
+    /* 装入正式内核页目录；分页通常已由 boot.s 打开，这里保持幂等。 */
     load_cr3(current_page_directory_phys);
 
     cr0 = read_cr0();
-    write_cr0(cr0 | CR0_PAGING);
+    if ((cr0 & CR0_PAGING) == 0) {
+        write_cr0(cr0 | CR0_PAGING);
+    }
 
     paging_enabled = 1;
     current_page_directory = (uint32_t*)phys_to_virt(current_page_directory_phys);
@@ -372,14 +365,9 @@ int vmm_create_address_space(uint32_t* page_directory_phys_out) {
 
     /*
      * 地址空间共享策略：
-     * - 低 4MiB：保留给启动代码、VGA、早期内核结构等公共低端映射
      * - 0xC0000000 以上：共享整个内核高地址空间
-     * - 中间用户区：先留空，由各进程自己映射代码和栈
+     * - 低地址和中间用户区：先留空，由各进程自己映射代码和栈
      */
-    for (uint32_t i = 0; i < KERNEL_LOW_SHARED_DIRECTORIES; i++) {
-        new_page_directory[i] = kernel_page_directory[i];
-    }
-
     for (uint32_t i = KERNEL_DIRECTORY_START; i < PAGE_TABLE_ENTRIES; i++) {
         new_page_directory[i] = kernel_page_directory[i];
     }
@@ -398,10 +386,10 @@ void vmm_destroy_address_space(uint32_t page_directory_phys) {
     page_directory = (uint32_t*)phys_to_virt(page_directory_phys);
 
     /*
-     * 只释放该进程私有的“中间用户空间”页表；
-     * 低端共享页表和高地址内核页表都由内核统一维护，不应在这里释放。
+     * 只释放该进程私有用户空间页表；
+     * 高地址内核页表由内核统一维护，不应在这里释放。
      */
-    for (uint32_t i = KERNEL_LOW_SHARED_DIRECTORIES; i < KERNEL_DIRECTORY_START; i++) {
+    for (uint32_t i = 0; i < KERNEL_DIRECTORY_START; i++) {
         if (page_directory[i] & PAGE_PRESENT) {
             pmm_free_page(page_directory[i] & PAGE_ADDR_MASK);
             page_directory[i] = 0;

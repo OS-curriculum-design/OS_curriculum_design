@@ -76,7 +76,7 @@ int vmm_switch_page_directory(uint32_t page_directory_phys);
 uint32_t vmm_get_page_directory(void);
 /* 返回内核主页目录物理地址。 */
 uint32_t vmm_get_kernel_page_directory(void);
-/* 返回低端恒等映射总字节数。 */
+/* 返回正式页目录中的低端恒等映射总字节数。 */
 uint32_t vmm_get_identity_mapped_bytes(void);
 /* 返回高地址内核映射总字节数。 */
 uint32_t vmm_get_kernel_mapped_bytes(void);

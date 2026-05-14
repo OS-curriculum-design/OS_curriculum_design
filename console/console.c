@@ -1,12 +1,12 @@
 /*
  * VGA 文本控制台实现
  * ===================
- * 这个模块直接操作 0xB8000 文本显存，并额外维护一份历史缓冲，
+ * 这个模块通过内核高地址 direct map 操作 VGA 文本显存，并额外维护一份历史缓冲，
  * 让用户可以在文本模式下回看已经滚出屏幕的内容。
  */
 #include "console.h"
 
-#define VGA_MEMORY ((uint16_t*)0xB8000)
+#define VGA_MEMORY ((uint16_t*)0xC00B8000)
 
 /* 当前命令行输出光标位置，按“历史缓冲中的绝对行号”记录。 */
 static size_t cursor_row = 0;
